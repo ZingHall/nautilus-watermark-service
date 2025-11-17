@@ -148,21 +148,12 @@ fn decrypt_content(encrypted_data: &[u8], decryption_key: &[u8]) -> Result<Strin
             "Encrypted data too short".into(),
         ));
     }
-
-    info!(
-        "Decrypting data: length={}, key_length={}",
-        encrypted_data.len(),
-        decryption_key.len()
-    );
-
     let iv = &encrypted_data[0..12];
     if iv != ZING_FILE_KEY_IV_12_BYTES {
         return Err(EnclaveError::GenericError("Invalid IV value".into()));
     }
 
     let ciphertext_and_tag = &encrypted_data[12..];
-    println!("iv : {iv:?}");
-    println!("ciphertext_and_tag : {ciphertext_and_tag:?}");
 
     let cipher = Aes256Gcm::new_from_slice(decryption_key)
         .map_err(|e| EnclaveError::GenericError(format!("Cipher init failed: {e}")))?;
@@ -271,8 +262,6 @@ mod test {
 
         let decrypted_content = decrypted_result.unwrap();
         assert_eq!(decrypted_content, "jarek\n");
-
-        println!("✓ Successfully decrypted: {decrypted_content}");
     }
 
     #[test]
