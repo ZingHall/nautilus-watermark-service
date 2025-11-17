@@ -8,7 +8,7 @@ use seal_sdk::{EncryptedObject, IBEPublicKey};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use sui_sdk_types::ObjectId as ObjectID;
+use sui_sdk_types::{Address, ObjectId as ObjectID};
 
 /// Custom deserializer for hex strings to Vec<u8>
 fn deserialize_hex_vec<'de, D>(deserializer: D) -> Result<Vec<KeyId>, D::Error>
@@ -19,6 +19,18 @@ where
     hex_strings
         .into_iter()
         .map(|s| Hex::decode(&s).map_err(serde::de::Error::custom))
+        .collect()
+}
+
+/// Custom deserializer for Vec of hex strings to Vec<ObjectID>
+fn deserialize_wallet_addresses<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let strings: Vec<String> = Vec::deserialize(deserializer)?;
+    strings
+        .into_iter()
+        .map(|s| Address::from_str(&s).map_err(serde::de::Error::custom))
         .collect()
 }
 
@@ -160,6 +172,8 @@ pub struct InitParameterLoadResponse {
 /// Request for /complete_parameter_load
 #[derive(Serialize, Deserialize)]
 pub struct CompleteParameterLoadRequest {
+    #[serde(deserialize_with = "deserialize_wallet_addresses")]
+    pub wallet_addresses: Vec<Address>,
     #[serde(deserialize_with = "deserialize_encrypted_objects")]
     pub encrypted_objects: Vec<EncryptedObject>,
     #[serde(deserialize_with = "deserialize_seal_responses")]
@@ -170,5 +184,5 @@ pub struct CompleteParameterLoadRequest {
 /// Can be removed for your own app.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompleteParameterLoadResponse {
-    pub dummy_secrets: Vec<Vec<u8>>,
+    pub loaded_keys_count: usize,
 }

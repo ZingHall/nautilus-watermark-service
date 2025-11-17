@@ -100,7 +100,7 @@ pub async fn get_attestation(
 
     let pk = state.eph_kp.public();
     let fd = driver::nsm_init();
-
+    // it’s the low-level API that lets your enclave talk to the Nitro hardware.
     // Send attestation request to NSM driver with public key set.
     let request = NsmRequest::Attestation {
         user_data: None,

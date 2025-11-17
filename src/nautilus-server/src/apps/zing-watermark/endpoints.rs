@@ -1,6 +1,6 @@
-// Copyright (c), Mysten Labs, Inc.
-// SPDX-License-Identifier: Apache-2.0
+// This file will be created to show the FILE_KEYS definition
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +15,7 @@ use seal_sdk::{
     genkey, seal_decrypt_all_objects, signed_message, signed_request, Certificate, ElGamalSecretKey,
 };
 use sui_sdk_types::{
-    Argument, Command, Identifier, Input, MoveCall, ObjectId as ObjectID, PersonalMessage,
+    Address, Argument, Command, Identifier, Input, MoveCall, ObjectId as ObjectID, PersonalMessage,
     ProgrammableTransaction,
 };
 use tokio::sync::RwLock;
@@ -37,10 +37,9 @@ lazy_static::lazy_static! {
         genkey(&mut thread_rng())
     };
 
-    /// Secret plaintext decrypted and set in enclave here when
-    /// /complete_parameter_load finishes. This is the weather
-    /// API key in this example, change it for your application.
-    pub static ref SEAL_API_KEY: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
+   /// Maps: wallet address ? raw 32-byte FileKey (AES-256 key)
+    pub static ref FILE_KEYS: Arc<RwLock<HashMap<Address, Vec<u8>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
 }
 
 /// This endpoint takes an enclave obj id with initial shared version
@@ -53,9 +52,9 @@ pub async fn init_parameter_load(
     State(state): State<Arc<AppState>>,
     Json(request): Json<InitParameterLoadRequest>,
 ) -> Result<Json<InitParameterLoadResponse>, EnclaveError> {
-    if SEAL_API_KEY.read().await.is_some() {
+    if !FILE_KEYS.read().await.is_empty() {
         return Err(EnclaveError::GenericError(
-            "API key already set".to_string(),
+            "File keys already set".to_string(),
         ));
     }
     // Generate the session and create certificate.
@@ -63,7 +62,7 @@ pub async fn init_parameter_load(
     let session_vk = session.public();
     let creation_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| EnclaveError::GenericError(format!("Time error: {}", e)))?
+        .map_err(|e| EnclaveError::GenericError(format!("Time error: {e}")))?
         .as_millis() as u64;
     let ttl_min = 10;
     let message = signed_message(
@@ -88,7 +87,7 @@ pub async fn init_parameter_load(
         sui_private_key
             .sign_personal_message(&PersonalMessage(message.as_bytes().into()))
             .map_err(|e| {
-                EnclaveError::GenericError(format!("Failed to sign personal message: {}", e))
+                EnclaveError::GenericError(format!("Failed to sign personal message: {e}"))
             })?
     };
 
@@ -110,7 +109,7 @@ pub async fn init_parameter_load(
         request.ids,
     )
     .await
-    .map_err(|e| EnclaveError::GenericError(format!("Failed to create PTB: {}", e)))?;
+    .map_err(|e| EnclaveError::GenericError(format!("Failed to create PTB: {e}")))?;
 
     // Load the encryption public key and verification key.
     let (_enc_secret, enc_key, enc_verification_key) = &*ENCRYPTION_KEYS;
@@ -133,17 +132,16 @@ pub async fn init_parameter_load(
 
 /// This endpoint accepts a list of encrypted objects and encoded seal responses,
 /// It parses the seal responses for all IDs and decrypt all encrypted objects
-/// with the encryption secret key. If all encrypted objects are decrypted, initialize
-/// the SEAL_API_KEY with the first secret and return the dummy secrets in the response.
-/// Remove dummy secrets for your app. This is done after the Seal responses are fetched
-/// and to complete the bootstrap phase.
+/// with the encryption secret key. If all encrypted objects are decrypted, store
+/// the file keys in FILE_KEYS for future usage. Each decrypted result should be
+/// a 32-byte AES-256 file key that corresponds to a wallet address.
 pub async fn complete_parameter_load(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<CompleteParameterLoadRequest>,
 ) -> Result<Json<CompleteParameterLoadResponse>, EnclaveError> {
-    if SEAL_API_KEY.read().await.is_some() {
+    if !FILE_KEYS.read().await.is_empty() {
         return Err(EnclaveError::GenericError(
-            "API key already set".to_string(),
+            "File keys already set".to_string(),
         ));
     }
 
@@ -155,25 +153,44 @@ pub async fn complete_parameter_load(
         &request.encrypted_objects,
         &SEAL_CONFIG.server_pk_map,
     )
-    .map_err(|e| EnclaveError::GenericError(format!("Failed to decrypt objects: {}", e)))?;
+    .map_err(|e| EnclaveError::GenericError(format!("Failed to decrypt objects: {e}")))?;
 
-    // The first secret is the weather API key, store it.
-    if let Some(api_key_bytes) = decrypted_results.first() {
-        let api_key_str = String::from_utf8(api_key_bytes.clone())
-            .map_err(|e| EnclaveError::GenericError(format!("Invalid UTF-8 in secret: {}", e)))?;
-
-        let mut api_key_guard = (*SEAL_API_KEY).write().await;
-        *api_key_guard = Some(api_key_str.clone());
-    } else {
+    if decrypted_results.is_empty() {
         return Err(EnclaveError::GenericError(
             "No secrets were decrypted".to_string(),
         ));
     }
 
-    // Return the rest of decrypted secrets as an example,
-    // remove for your app as needed.
+    // Validate that we have wallet addresses for each decrypted file key
+    if request.wallet_addresses.len() != decrypted_results.len() {
+        return Err(EnclaveError::GenericError(format!(
+            "Mismatch between wallet addresses ({}) and decrypted keys ({})",
+            request.wallet_addresses.len(),
+            decrypted_results.len()
+        )));
+    }
+
+    // Store file keys in FILE_KEYS mapping wallet address to raw 32-byte AES-256 key
+    let mut file_keys_guard = FILE_KEYS.write().await;
+    for (wallet_address, file_key_bytes) in request
+        .wallet_addresses
+        .iter()
+        .zip(decrypted_results.iter())
+    {
+        // Validate that the file key is exactly 32 bytes (AES-256)
+        if file_key_bytes.len() != 32 {
+            return Err(EnclaveError::GenericError(format!(
+                "Invalid file key length for wallet {}: expected 32 bytes, got {}",
+                wallet_address,
+                file_key_bytes.len()
+            )));
+        }
+
+        file_keys_guard.insert(*wallet_address, file_key_bytes.clone());
+    }
+
     Ok(Json(CompleteParameterLoadResponse {
-        dummy_secrets: decrypted_results[1..].to_vec(),
+        loaded_keys_count: decrypted_results.len(),
     }))
 }
 

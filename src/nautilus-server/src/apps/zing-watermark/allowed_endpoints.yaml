@@ -1,3 +1,4 @@
+---
 # External endpoints that the enclave is allowed to access. 
 endpoints:
-  - api.weatherapi.com # replace with your own endpoints
+  - https://fullnode.testnet.sui.io:443  # mysten testnet url
