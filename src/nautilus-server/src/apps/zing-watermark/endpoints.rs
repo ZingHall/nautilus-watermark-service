@@ -1,6 +1,7 @@
 // This file will be created to show the FILE_KEYS definition
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +16,7 @@ use seal_sdk::{
     genkey, seal_decrypt_all_objects, signed_message, signed_request, Certificate, ElGamalSecretKey,
 };
 use sui_sdk_types::{
-    Address, Argument, Command, Identifier, Input, MoveCall, ObjectId as ObjectID, PersonalMessage,
+    Address, Argument, Command, Identifier, Input, MoveCall, PersonalMessage,
     ProgrammableTransaction,
 };
 use tokio::sync::RwLock;
@@ -93,7 +94,7 @@ pub async fn init_parameter_load(
 
     // Create certificate with enclave's ephemeral key's address and session vk.
     let certificate = Certificate {
-        user: sui_private_key.public_key().to_address(),
+        user: sui_private_key.public_key().derive_address(),
         session_vk: session_vk.clone(),
         creation_time,
         ttl_min,
@@ -197,8 +198,8 @@ pub async fn complete_parameter_load(
 /// Helper function that creates a PTB with multiple commands for
 /// the given IDs and the enclave shared object.
 async fn create_ptb(
-    package_id: ObjectID,
-    enclave_object_id: ObjectID,
+    package_id: Address,
+    enclave_object_id: Address,
     initial_shared_version: u64,
     ids: Vec<KeyId>,
 ) -> Result<ProgrammableTransaction, Box<dyn std::error::Error>> {
@@ -220,6 +221,16 @@ async fn create_ptb(
         mutable: false,
     });
 
+    let config_object_input_idx = inputs.len();
+    inputs.push(Input::Shared {
+        object_id: Address::from_str(
+            "0x7e34db1b83f7701e549e6c1d050d42136fee8af942481a15424c4ed3cbb5bd81",
+        )
+        .unwrap(),
+        initial_shared_version: 645292721,
+        mutable: false,
+    });
+
     // Create multiple commands with each one calling seal_approve
     // with a different ID and the shared enclave object.
     for (idx, _id) in ids.iter().enumerate() {
@@ -229,8 +240,9 @@ async fn create_ptb(
             function: Identifier::new("seal_approve")?,
             type_arguments: vec![],
             arguments: vec![
-                Argument::Input(idx as u16),               // ID input
-                Argument::Input(enclave_input_idx as u16), // Enclave object
+                Argument::Input(idx as u16),                     // ID input
+                Argument::Input(config_object_input_idx as u16), // Config object
+                Argument::Input(enclave_input_idx as u16),       // Enclave object
             ],
         };
         commands.push(Command::MoveCall(move_call));

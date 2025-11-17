@@ -8,7 +8,7 @@ use seal_sdk::{EncryptedObject, IBEPublicKey};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use sui_sdk_types::{Address, ObjectId as ObjectID};
+use sui_sdk_types::Address;
 
 /// Custom deserializer for hex strings to Vec<u8>
 fn deserialize_hex_vec<'de, D>(deserializer: D) -> Result<Vec<KeyId>, D::Error>
@@ -22,7 +22,7 @@ where
         .collect()
 }
 
-/// Custom deserializer for Vec of hex strings to Vec<ObjectID>
+/// Custom deserializer for Vec of hex strings to Vec<Address>
 fn deserialize_wallet_addresses<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
 where
     D: Deserializer<'de>,
@@ -34,24 +34,24 @@ where
         .collect()
 }
 
-/// Custom deserializer for hex string to ObjectID
-fn deserialize_object_id<'de, D>(deserializer: D) -> Result<ObjectID, D::Error>
+/// Custom deserializer for hex string to Address
+fn deserialize_object_id<'de, D>(deserializer: D) -> Result<Address, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s: String = String::deserialize(deserializer)?;
-    ObjectID::from_str(&s).map_err(serde::de::Error::custom)
+    Address::from_str(&s).map_err(serde::de::Error::custom)
 }
 
-/// Custom deserializer for Vec of hex strings to Vec<ObjectID>
-fn deserialize_object_ids<'de, D>(deserializer: D) -> Result<Vec<ObjectID>, D::Error>
+/// Custom deserializer for Vec of hex strings to Vec<Address>
+fn deserialize_object_ids<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let strings: Vec<String> = Vec::deserialize(deserializer)?;
     strings
         .into_iter()
-        .map(|s| ObjectID::from_str(&s).map_err(serde::de::Error::custom))
+        .map(|s| Address::from_str(&s).map_err(serde::de::Error::custom))
         .collect()
 }
 
@@ -76,16 +76,16 @@ where
         .collect()
 }
 
-/// Custom deserializer for hex string to Vec<(ObjectID, FetchKeyResponse)>
+/// Custom deserializer for hex string to Vec<(Address, FetchKeyResponse)>
 fn deserialize_seal_responses<'de, D>(
     deserializer: D,
-) -> Result<Vec<(ObjectID, FetchKeyResponse)>, D::Error>
+) -> Result<Vec<(Address, FetchKeyResponse)>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let hex_string: String = String::deserialize(deserializer)?;
     let bytes = Hex::decode(&hex_string).map_err(serde::de::Error::custom)?;
-    let responses: Vec<(ObjectID, FetchKeyResponse)> =
+    let responses: Vec<(Address, FetchKeyResponse)> =
         bcs::from_bytes(&bytes).map_err(serde::de::Error::custom)?;
     Ok(responses)
 }
@@ -106,23 +106,23 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "SealConfigRaw")]
 pub struct SealConfig {
-    pub key_servers: Vec<ObjectID>,
+    pub key_servers: Vec<Address>,
     pub public_keys: Vec<IBEPublicKey>,
-    pub v0_package_id: ObjectID,
-    pub latest_package_id: ObjectID,
-    pub server_pk_map: HashMap<ObjectID, IBEPublicKey>,
+    pub v0_package_id: Address,
+    pub latest_package_id: Address,
+    pub server_pk_map: HashMap<Address, IBEPublicKey>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SealConfigRaw {
     #[serde(deserialize_with = "deserialize_object_ids")]
-    key_servers: Vec<ObjectID>,
+    key_servers: Vec<Address>,
     #[serde(deserialize_with = "deserialize_ibe_public_keys")]
     public_keys: Vec<IBEPublicKey>,
     #[serde(deserialize_with = "deserialize_object_id")]
-    v0_package_id: ObjectID,
+    v0_package_id: Address,
     #[serde(deserialize_with = "deserialize_object_id")]
-    latest_package_id: ObjectID,
+    latest_package_id: Address,
 }
 
 impl TryFrom<SealConfigRaw> for SealConfig {
@@ -137,7 +137,7 @@ impl TryFrom<SealConfigRaw> for SealConfig {
             ));
         }
 
-        let server_pk_map: HashMap<ObjectID, IBEPublicKey> = raw
+        let server_pk_map: HashMap<Address, IBEPublicKey> = raw
             .key_servers
             .iter()
             .zip(raw.public_keys.iter())
@@ -157,7 +157,7 @@ impl TryFrom<SealConfigRaw> for SealConfig {
 /// Request for /init_parameter_load
 #[derive(Serialize, Deserialize)]
 pub struct InitParameterLoadRequest {
-    pub enclave_object_id: ObjectID,
+    pub enclave_object_id: Address,
     pub initial_shared_version: u64,
     #[serde(deserialize_with = "deserialize_hex_vec")]
     pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
@@ -177,7 +177,7 @@ pub struct CompleteParameterLoadRequest {
     #[serde(deserialize_with = "deserialize_encrypted_objects")]
     pub encrypted_objects: Vec<EncryptedObject>,
     #[serde(deserialize_with = "deserialize_seal_responses")]
-    pub seal_responses: Vec<(ObjectID, FetchKeyResponse)>,
+    pub seal_responses: Vec<(Address, FetchKeyResponse)>,
 }
 
 /// Response for /complete_parameter_load, for demo on decrypting many secrets.
