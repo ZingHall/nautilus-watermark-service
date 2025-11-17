@@ -1,4 +1,5 @@
 *.env
+*.pem
 user-data.sh
 trust-policy.json
 secrets-policy.json

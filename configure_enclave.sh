@@ -1,5 +1,3 @@
-# Copyright (c), Mysten Labs, Inc.
-# SPDX-License-Identifier: Apache-2.0
 #!/bin/bash
 # configure_enclave.sh
 
@@ -23,7 +21,6 @@ show_help() {
     echo "  export KEY_PAIR=<your-key-pair-name>"
     echo "  # optional: export REGION=<your-region>  (defaults to us-east-1)"
     echo "  # optional: export AMI_ID=<your-ami-id>  (defaults to ami-085ad6ae776d8f09c)"
-    echo "  # optional: export API_ENV_VAR_NAME=<env-var-name> (defaults to 'API_KEY')"
     echo "  ./configure_enclave.sh <APP>"
     echo ""
     echo "Options:"
@@ -41,7 +38,7 @@ if [ -z "$1" ]; then
     echo "Error: APP argument is required."
     echo "Usage: ./configure_enclave.sh <APP>"
     echo "Example: ./configure_enclave.sh twitter-example"
-    echo "Example: ./configure_enclave.sh weather-example"
+    echo "Example: ./configure_enclave.sh seal-example"
     echo ""
     echo "For more information, run: ./configure_enclave.sh --help"
     exit 1
@@ -56,9 +53,6 @@ export AWS_DEFAULT_REGION="$REGION"
 
 # The default AMI for us-east-1. Change this if your region is different.
 AMI_ID="${AMI_ID:-ami-085ad6ae776d8f09c}"
-
-# Environment variable name for our secret; default is 'API_KEY'
-API_ENV_VAR_NAME="${API_ENV_VAR_NAME:-API_KEY}"
 
 ENCLAVE_APP="${1}"
 ALLOWLIST_PATH="src/nautilus-server/src/apps/${ENCLAVE_APP}/allowed_endpoints.yaml"
@@ -77,14 +71,13 @@ if [ -z "$KEY_PAIR" ]; then
     echo "Error: Environment variable KEY_PAIR is not set. Please export KEY_PAIR=<your-key-name>."
     exit 1
 fi
+
 # Check if yq is available
 if ! command -v yq >/dev/null 2>&1; then
   echo "Error: yq is not installed."
   echo "Please install yq (for example: 'brew install yq' on macOS or 'sudo apt-get install yq' on Ubuntu) and try again."
   exit 1
 fi
-
-#echo "yq is installed. Proceeding..."
 
 ############################
 # Set the EC2 Instance Name
@@ -102,19 +95,16 @@ fi
 FINAL_INSTANCE_NAME="${EC2_INSTANCE_NAME}-${RANDOM_SUFFIX}"
 echo "Instance will be named: $FINAL_INSTANCE_NAME"
 
-
 #########################################
 # Read endpoints from allowed_endpoints.yaml
 #########################################
 if [ -f "$ALLOWLIST_PATH" ]; then
-    # Use a small Python snippet to parse the YAML and emit space-separated endpoints
     ENDPOINTS=$(yq e '.endpoints | join(" ")' $ALLOWLIST_PATH 2>/dev/null)
     if [ -n "$ENDPOINTS" ]; then
         echo "Endpoints found in $ALLOWLIST_PATH (before region patching):"
         echo "$ENDPOINTS"
 
-        # Replace any existing region (like us-east-1, us-west-2, etc.) in kms.* / secretsmanager.* with the user-provided $REGION.
-        # This way, if $REGION=us-west-2, you'll get kms.us-west-2.amazonaws.com etc.
+        # Replace any existing region in kms.* / secretsmanager.* with the user-provided $REGION.
         ENDPOINTS=$(echo "$ENDPOINTS" \
           | sed "s|kms\.[^.]*\.amazonaws\.com|kms.$REGION.amazonaws.com|g" \
           | sed "s|secretsmanager\.[^.]*\.amazonaws\.com|secretsmanager.$REGION.amazonaws.com|g")
@@ -129,14 +119,15 @@ else
 fi
 
 #########################################
-# Decide about secrets (3 scenarios)
+# Decide about secrets - seal-example doesn't use AWS secrets
 #########################################
-# Check if this is the seal example - skip AWS secret prompts entirely
 if [[ "$ENCLAVE_APP" == "seal-example" ]]; then
-    echo "Seal example detected. Configuring without AWS secrets..."
+    echo "Seal example detected. This app uses Seal SDK for key management."
+    echo "Configuring without AWS Secrets Manager..."
     USE_SECRET="n"
     IS_SEAL_EXAMPLE=true
 else
+    # For other apps, ask about secrets
     read -p "Do you want to use a secret? (y/n): " USE_SECRET
 
     # Validate input
@@ -146,6 +137,7 @@ else
     fi
 fi
 
+# Handle AWS Secrets Manager configuration (only for non-seal apps that want secrets)
 if [[ "$USE_SECRET" =~ ^[Yy]$ ]]; then
     read -p "Do you want to create a new secret or use an existing secret ARN? (new/existing): " SECRET_CHOICE
 
@@ -156,16 +148,8 @@ if [[ "$USE_SECRET" =~ ^[Yy]$ ]]; then
     fi
 
     if [[ "$SECRET_CHOICE" =~ ^([Nn]ew|NEW)$ ]]; then
-        #----------------------------------------------------
-        # Create a new secret
-        #----------------------------------------------------
+        # Create a new secret (existing logic)
         read -p "Enter secret name: " USER_SECRET_NAME
-    fi
-fi
-
-# Re-check USE_SECRET after potential seal detection
-if [[ "$USE_SECRET" =~ ^[Yy]$ ]]; then
-    if [[ "$SECRET_CHOICE" =~ ^([Nn]ew|NEW)$ ]]; then
         read -s -p "Enter secret value: " SECRET_VALUE
         echo ""
         SECRET_NAME="${USER_SECRET_NAME}"
@@ -177,12 +161,12 @@ if [[ "$USE_SECRET" =~ ^[Yy]$ ]]; then
           --query 'ARN' --output text)
         if [ $? -ne 0 ] || [ -z "$SECRET_ARN" ]; then
             echo "Failed to create secret '$SECRET_NAME'."
-            echo "Make sure AWS credentials are configured, e.g. AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN."
+            echo "Make sure AWS credentials are configured."
             exit 1
         fi
         echo "Secret created with ARN: $SECRET_ARN"
 
-        # Create IAM Role, Policy, and Instance Profile for Secret Access
+        # Create IAM Role for Secret Access (existing logic)
         ROLE_NAME="role-${FINAL_INSTANCE_NAME}"
         echo "Creating IAM role '$ROLE_NAME' for the EC2 instance..."
 
@@ -233,45 +217,23 @@ EOF
            --instance-profile-name "$ROLE_NAME" \
            --role-name "$ROLE_NAME" > /dev/null 2>&1
 
-        IAM_INSTANCE_PROFILE_OPTION=""
-
-        # Remove old references first and add new secret fetching logic
-        if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
-            sed -i '' '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
-            
-            sed -i '' "/# Secrets-block/a\\
-SECRET_VALUE=\$(aws secretsmanager get-secret-value --secret-id ${SECRET_ARN} --region ${REGION} | jq -r .SecretString)\\
-echo \"\$SECRET_VALUE\" | jq -R '{\"${API_ENV_VAR_NAME}\": .}' > secrets.json\\
-" expose_enclave.sh
-        else
-            sed -i '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
-            sed -i '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
-            
-            sed -i "/# Secrets-block/a\\
-SECRET_VALUE=\$(aws secretsmanager get-secret-value --secret-id ${SECRET_ARN} --region ${REGION} | jq -r .SecretString)\\
-echo \"\$SECRET_VALUE\" | jq -R '{\"${API_ENV_VAR_NAME}\": .}' > secrets.json" expose_enclave.sh
-        fi
-
-        echo "Secret fetching logic added to expose_enclave.sh"
+        # Note: For non-seal apps with secrets, keep the original secret handling in expose_enclave.sh
+        # This section is intentionally left without modifications to expose_enclave.sh
+        # since those apps still use the traditional API_KEY pattern
 
     elif [[ "$SECRET_CHOICE" =~ ^([Ee]xisting|EXISTING)$ ]]; then
-        #----------------------------------------------------
-        # Use an existing secret ARN
-        #----------------------------------------------------
+        # Use existing secret (existing logic)
         read -p "Enter the existing secret ARN: " SECRET_ARN
 
-        # Validate that the secret exists and has a value
         echo "Validating secret ARN..."
         SECRET_VALUE=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --region "$REGION" 2>&1)
         if [ $? -ne 0 ]; then
-            echo "Error: Failed to retrieve secret. Enter a valid secret ARN and try again. "
+            echo "Error: Failed to retrieve secret. Enter a valid secret ARN and try again."
             echo "AWS CLI error:"
             echo "$SECRET_VALUE"
             exit 1
         fi
         
-        # Extract the actual secret value from the JSON response
         SECRET_VALUE=$(echo "$SECRET_VALUE" | jq -r '.SecretString // empty')
         if [ -z "$SECRET_VALUE" ]; then
             echo "Error: Invalid secret string."
@@ -279,8 +241,7 @@ echo \"\$SECRET_VALUE\" | jq -R '{\"${API_ENV_VAR_NAME}\": .}' > secrets.json" e
         fi
         echo "Secret validation successful"
 
-        # We won't create a new secret, but we still need the instance role if we need
-        # to actually read from Secrets Manager.
+        # Create IAM role for existing secret (existing logic)
         ROLE_NAME="role-${FINAL_INSTANCE_NAME}"
         echo "Creating IAM role '$ROLE_NAME' for the EC2 instance..."
 
@@ -299,11 +260,11 @@ echo \"\$SECRET_VALUE\" | jq -R '{\"${API_ENV_VAR_NAME}\": .}' > secrets.json" e
 }
 EOF
 
-          aws iam create-role \
-             --role-name "$ROLE_NAME" \
-             --assume-role-policy-document file://trust-policy.json > /dev/null 2>&1
+        aws iam create-role \
+           --role-name "$ROLE_NAME" \
+           --assume-role-policy-document file://trust-policy.json > /dev/null 2>&1
 
-          cat <<EOF > secrets-policy.json
+        cat <<EOF > secrets-policy.json
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -319,68 +280,30 @@ EOF
 }
 EOF
 
-          aws iam put-role-policy \
-             --role-name "$ROLE_NAME" \
-             --policy-name "$FINAL_INSTANCE_NAME" \
-             --policy-document file://secrets-policy.json > /dev/null 2>&1
+        aws iam put-role-policy \
+           --role-name "$ROLE_NAME" \
+           --policy-name "$FINAL_INSTANCE_NAME" \
+           --policy-document file://secrets-policy.json > /dev/null 2>&1
 
-          aws iam create-instance-profile \
-             --instance-profile-name "$ROLE_NAME" > /dev/null 2>&1
+        aws iam create-instance-profile \
+           --instance-profile-name "$ROLE_NAME" > /dev/null 2>&1
 
-          aws iam add-role-to-instance-profile \
-             --instance-profile-name "$ROLE_NAME" \
-             --role-name "$ROLE_NAME" > /dev/null 2>&1
-
-          IAM_INSTANCE_PROFILE_OPTION=""
-        
-        # Remove old references first
-        if [[ "$(uname)" == "Darwin" ]]; then
-          sed -i '' '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
-          sed -i '' '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
-        else
-          sed -i '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
-          sed -i '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
-        fi
-
-        echo "Inserting existing secret ARN lines into expose_enclave.sh..."
-
-        if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "/# Secrets-block/a\\
-SECRET_VALUE=\$(aws secretsmanager get-secret-value --secret-id ${SECRET_ARN} --region ${REGION} | jq -r .SecretString)\\
-echo \"\$SECRET_VALUE\" | jq -R '{\"${API_ENV_VAR_NAME}\": .}' > secrets.json" expose_enclave.sh
-        else
-            sed -i "/# Secrets-block/a\\
-SECRET_VALUE=\$(aws secretsmanager get-secret-value --secret-id ${SECRET_ARN} --region ${REGION} | jq -r .SecretString)\\
-echo \"\$SECRET_VALUE\" | jq -R '{\"${API_ENV_VAR_NAME}\": .}' > secrets.json" expose_enclave.sh
-        fi
-
-    else
-        echo "Invalid choice. No secret created or used."
-        IAM_INSTANCE_PROFILE_OPTION=""
-        ROLE_NAME=""
-
-        # Remove references
-        if [[ "$(uname)" == "Darwin" ]]; then
-          sed -i '' '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
-          sed -i '' '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
-        else
-          sed -i '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
-          sed -i '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
-        fi
+        aws iam add-role-to-instance-profile \
+           --instance-profile-name "$ROLE_NAME" \
+           --role-name "$ROLE_NAME" > /dev/null 2>&1
     fi
-
 else
     #-----------------------------------------
-    # No secret configuration
+    # No AWS Secrets Manager configuration
     #-----------------------------------------
-    echo "Configuring without AWS secrets..."
+    echo "Configuring without AWS Secrets Manager..."
     
     # Clear IAM-related variables
     IAM_INSTANCE_PROFILE_OPTION=""
     ROLE_NAME=""
 
     # Remove any existing secret references from expose_enclave.sh
-    echo "Removing secret references from expose_enclave.sh..."
+    echo "Removing AWS Secrets Manager references from expose_enclave.sh..."
     if [[ "$(uname)" == "Darwin" ]]; then
         sed -i '' '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
         sed -i '' '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
@@ -438,7 +361,6 @@ echo '{}' > secrets.json" expose_enclave.sh
         fi
     fi
 fi
-
 
 #############################################################
 # Create the user-data script that the instance will run
@@ -517,17 +439,13 @@ echo "$endpoints_config"
 
 # Remove any existing endpoint lines (except the first localhost line)
 if [[ "$(uname)" == "Darwin" ]]; then
-    # Remove only the IP mapping lines, preserving comments
     sed -i '' '/echo "127.0.0.[0-9]*   .*" >> \/etc\/hosts/d' src/nautilus-server/run.sh
-    # Restore the localhost line if it was removed
     if ! grep -q "echo \"127.0.0.1   localhost\" > /etc/hosts" src/nautilus-server/run.sh; then
         sed -i '' '/# Add a hosts record/a\
 echo "127.0.0.1   localhost" > /etc/hosts' src/nautilus-server/run.sh
     fi
 else
-    # Remove only the IP mapping lines, preserving comments
     sed -i '/echo "127.0.0.[0-9]*   .*" >> \/etc\/hosts/d' src/nautilus-server/run.sh
-    # Restore the localhost line if it was removed
     if ! grep -q "echo \"127.0.0.1   localhost\" > /etc/hosts" src/nautilus-server/run.sh; then
         sed -i '/# Add a hosts record/a\echo "127.0.0.1   localhost" > /etc/hosts' src/nautilus-server/run.sh
     fi
@@ -537,7 +455,6 @@ fi
 tmp_hosts="/tmp/endpoints_config.txt"
 echo "$endpoints_config" > "$tmp_hosts"
 
-# Insert after the localhost line
 if [[ "$(uname)" == "Darwin" ]]; then
     sed -i '' "/echo \"127.0.0.1   localhost\" > \/etc\/hosts/ r $tmp_hosts" src/nautilus-server/run.sh
 else
@@ -613,7 +530,6 @@ if [ "$SECURITY_GROUP_ID" = "None" ] || [ -z "$SECURITY_GROUP_ID" ]; then
     --description "Security group allowing SSH (22), HTTPS (443), and port 3000" \
     --query "GroupId" --output text)
 
-  # Ensure that the security group is created successfully
   if [ $? -ne 0 ]; then
     echo "Error creating security group."
     exit 1

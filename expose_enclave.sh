@@ -9,6 +9,11 @@ ENCLAVE_CID=$(nitro-cli describe-enclaves | jq -r ".[0].EnclaveCID")
 
 sleep 5
 # Secrets-block
+# No secrets: create empty secrets.json for compatibility
+echo '{}' > secrets.json
+# No secrets: create empty secrets.json for compatibility
+# No secrets: create empty secrets.json for compatibility
+# No secrets: create empty secrets.json for compatibility
 # This section will be populated by configure_enclave.sh based on secret configuration
 
 cat secrets.json | socat - VSOCK-CONNECT:$ENCLAVE_CID:7777
