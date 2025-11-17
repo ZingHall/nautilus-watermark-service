@@ -3,7 +3,7 @@
 
 use fastcrypto::encoding::{Encoding, Hex};
 use fastcrypto::serde_helpers::ToFromByteArray;
-use seal_sdk::types::{FetchKeyResponse, KeyId};
+use seal_sdk::types::FetchKeyResponse;
 use seal_sdk::{EncryptedObject, IBEPublicKey};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
@@ -11,16 +11,16 @@ use std::str::FromStr;
 use sui_sdk_types::Address;
 
 /// Custom deserializer for hex strings to Vec<u8>
-fn deserialize_hex_vec<'de, D>(deserializer: D) -> Result<Vec<KeyId>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let hex_strings: Vec<String> = Vec::deserialize(deserializer)?;
-    hex_strings
-        .into_iter()
-        .map(|s| Hex::decode(&s).map_err(serde::de::Error::custom))
-        .collect()
-}
+// fn deserialize_hex_vec<'de, D>(deserializer: D) -> Result<Vec<KeyId>, D::Error>
+// where
+//     D: Deserializer<'de>,
+// {
+//     let hex_strings: Vec<String> = Vec::deserialize(deserializer)?;
+//     hex_strings
+//         .into_iter()
+//         .map(|s| Hex::decode(&s).map_err(serde::de::Error::custom))
+//         .collect()
+// }
 
 /// Custom deserializer for Vec of hex strings to Vec<Address>
 fn deserialize_wallet_addresses<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
@@ -111,6 +111,7 @@ pub struct SealConfig {
     pub v0_package_id: Address,
     pub latest_package_id: Address,
     pub server_pk_map: HashMap<Address, IBEPublicKey>,
+    pub studio_config_shared_object_id: Address,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,6 +124,8 @@ struct SealConfigRaw {
     v0_package_id: Address,
     #[serde(deserialize_with = "deserialize_object_id")]
     latest_package_id: Address,
+    #[serde(deserialize_with = "deserialize_object_id")]
+    studio_config_shared_object_id: Address,
 }
 
 impl TryFrom<SealConfigRaw> for SealConfig {
@@ -150,6 +153,7 @@ impl TryFrom<SealConfigRaw> for SealConfig {
             v0_package_id: raw.v0_package_id,
             latest_package_id: raw.latest_package_id,
             server_pk_map,
+            studio_config_shared_object_id: raw.studio_config_shared_object_id,
         })
     }
 }
@@ -159,8 +163,11 @@ impl TryFrom<SealConfigRaw> for SealConfig {
 pub struct InitParameterLoadRequest {
     pub enclave_object_id: Address,
     pub initial_shared_version: u64,
-    #[serde(deserialize_with = "deserialize_hex_vec")]
-    pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
+    // #[serde(deserialize_with = "deserialize_hex_vec")]
+    // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
+    #[serde(deserialize_with = "deserialize_wallet_addresses")]
+    pub wallet_addresses: Vec<Address>,
+    pub studio_initial_shared_versions: Vec<u64>,
 }
 
 /// Response for /init_parameter_load

@@ -1,7 +1,6 @@
 // This file will be created to show the FILE_KEYS definition
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,7 +16,7 @@ use seal_sdk::{
 };
 use sui_sdk_types::{
     Address, Argument, Command, Identifier, Input, MoveCall, PersonalMessage,
-    ProgrammableTransaction,
+    ProgrammableTransaction, TypeTag,
 };
 use tokio::sync::RwLock;
 
@@ -53,11 +52,6 @@ pub async fn init_parameter_load(
     State(state): State<Arc<AppState>>,
     Json(request): Json<InitParameterLoadRequest>,
 ) -> Result<Json<InitParameterLoadResponse>, EnclaveError> {
-    if !FILE_KEYS.read().await.is_empty() {
-        return Err(EnclaveError::GenericError(
-            "File keys already set".to_string(),
-        ));
-    }
     // Generate the session and create certificate.
     let session = Ed25519KeyPair::generate(&mut thread_rng());
     let session_vk = session.public();
@@ -102,12 +96,23 @@ pub async fn init_parameter_load(
         mvr_name: None,
     };
 
+    let studio_ids: Vec<Address> = request
+        .wallet_addresses
+        .iter()
+        .map(|addr| {
+            SEAL_CONFIG
+                .studio_config_shared_object_id
+                .derive_object_id(&TypeTag::Address, addr.as_bytes())
+        })
+        .collect();
+
     // Create PTB for seal_approve of package with all key IDs.
     let ptb = create_ptb(
         SEAL_CONFIG.latest_package_id,
         request.enclave_object_id,
         request.initial_shared_version,
-        request.ids,
+        studio_ids,
+        request.studio_initial_shared_versions,
     )
     .await
     .map_err(|e| EnclaveError::GenericError(format!("Failed to create PTB: {e}")))?;
@@ -140,12 +145,6 @@ pub async fn complete_parameter_load(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<CompleteParameterLoadRequest>,
 ) -> Result<Json<CompleteParameterLoadResponse>, EnclaveError> {
-    if !FILE_KEYS.read().await.is_empty() {
-        return Err(EnclaveError::GenericError(
-            "File keys already set".to_string(),
-        ));
-    }
-
     // Load the encryption secret key and try decrypting all encrypted objects.
     let (enc_secret, _enc_key, _enc_verification_key) = &*ENCRYPTION_KEYS;
     let decrypted_results = seal_decrypt_all_objects(
@@ -201,11 +200,17 @@ async fn create_ptb(
     package_id: Address,
     enclave_object_id: Address,
     initial_shared_version: u64,
-    ids: Vec<KeyId>,
+    studio_ids: Vec<Address>,
+    studio_initial_shared_versions: Vec<u64>,
+    // ids: Vec<KeyId>,
 ) -> Result<ProgrammableTransaction, Box<dyn std::error::Error>> {
     let mut inputs = vec![];
     let mut commands = vec![];
 
+    let ids: Vec<KeyId> = studio_ids
+        .iter()
+        .map(|studio_id| studio_id.as_bytes().to_vec())
+        .collect();
     // Create inputs for all IDs.
     for id in ids.iter() {
         inputs.push(Input::Pure {
@@ -223,10 +228,7 @@ async fn create_ptb(
 
     let config_object_input_idx = inputs.len();
     inputs.push(Input::Shared {
-        object_id: Address::from_str(
-            "0x7e34db1b83f7701e549e6c1d050d42136fee8af942481a15424c4ed3cbb5bd81",
-        )
-        .unwrap(),
+        object_id: SEAL_CONFIG.studio_config_shared_object_id,
         initial_shared_version: 645292721,
         mutable: false,
     });
@@ -234,14 +236,21 @@ async fn create_ptb(
     // Create multiple commands with each one calling seal_approve
     // with a different ID and the shared enclave object.
     for (idx, _id) in ids.iter().enumerate() {
+        let studio_id_input_idx = inputs.len();
+        inputs.push(Input::Shared {
+            object_id: studio_ids[idx],
+            initial_shared_version: studio_initial_shared_versions[idx],
+            mutable: false,
+        });
         let move_call = MoveCall {
             package: package_id,
-            module: Identifier::new("seal_policy")?,
-            function: Identifier::new("seal_approve")?,
+            module: Identifier::new("studio")?,
+            function: Identifier::new("seal_approve_registered_enclave")?,
             type_arguments: vec![],
             arguments: vec![
                 Argument::Input(idx as u16),                     // ID input
                 Argument::Input(config_object_input_idx as u16), // Config object
+                Argument::Input(studio_id_input_idx as u16),     // Studio Object
                 Argument::Input(enclave_input_idx as u16),       // Enclave object
             ],
         };
