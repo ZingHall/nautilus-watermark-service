@@ -29,6 +29,7 @@ echo "127.0.0.64   https://fullnode.testnet.sui.io:443" >> /etc/hosts
 
 
 
+
 # == ATTENTION: code should be generated here that parses allowed_endpoints.yaml and populate domains here ===
 
 cat /etc/hosts
@@ -52,7 +53,10 @@ python3 /traffic_forwarder.py 127.0.0.64 443 3 8101 &
 
 
 
+
 # Listens on Local VSOCK Port 3000 and forwards to localhost 3000
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 
+# Listen on VSOCK Port 3001 and forward to localhost 3001
+socat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &
 /nautilus-server

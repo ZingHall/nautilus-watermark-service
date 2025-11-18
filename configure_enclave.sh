@@ -125,7 +125,6 @@ if [[ "$ENCLAVE_APP" == "seal-example" ]]; then
     echo "Seal example detected. This app uses Seal SDK for key management."
     echo "Configuring without AWS Secrets Manager..."
     USE_SECRET="n"
-    IS_SEAL_EXAMPLE=true
 else
     # For other apps, ask about secrets
     read -p "Do you want to use a secret? (y/n): " USE_SECRET
@@ -311,54 +310,36 @@ else
         sed -i '/SECRET_VALUE=/d' expose_enclave.sh 2>/dev/null || true
         sed -i '/echo.*secrets\.json/d' expose_enclave.sh 2>/dev/null || true
     fi
+
+    echo "Configuring no-secrets setup..."
     
-    # Handle seal example specifically
-    if [ "$IS_SEAL_EXAMPLE" = true ]; then
-        echo "Configuring seal example..."
-        
-        # Add empty secrets.json (required by run.sh which waits for it on VSOCK)
-        if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "/# Secrets-block/a\\
-# Seal example: create empty secrets.json (required by run.sh)\\
-echo 'Creating empty secrets.json for seal example...'\\
+    # Add empty secrets.json (required by run.sh which waits for it on VSOCK)
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "/# Secrets-block/a\\
+# Create empty secrets.json (required by run.sh)\\
+echo 'Creating empty secrets.json...'\\
 echo '{}' > secrets.json\\
 " expose_enclave.sh
-            
-            # Expose port 3001 for localhost-only access to seal init endpoint
-            sed -i '' "/socat TCP4-LISTEN:3000,reuseaddr,fork VSOCK-CONNECT:\$ENCLAVE_CID:3000 &/a\\
+        
+        # Expose port 3001 for localhost-only access to init endpoint
+        sed -i '' "/socat TCP4-LISTEN:3000,reuseaddr,fork VSOCK-CONNECT:\$ENCLAVE_CID:3000 &/a\\
 \\
-# Seal example: Expose port 3001 for localhost-only access to init endpoint\\
-echo \"Exposing seal init endpoint on localhost:3001...\"\\
+# Expose port 3001 for localhost-only access to init endpoint\\
+echo \"Exposing init endpoint on localhost:3001...\"\\
 socat TCP4-LISTEN:3001,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:\$ENCLAVE_CID:3001 &\\
 " expose_enclave.sh
-        else
-            sed -i "/# Secrets-block/a\\
-# Seal example: create empty secrets.json (required by run.sh)\\
-echo 'Creating empty secrets.json for seal example...'\\
-echo '{}' > secrets.json" expose_enclave.sh
-            
-            # Expose port 3001 for localhost-only access to seal init endpoint
-            sed -i "/socat TCP4-LISTEN:3000,reuseaddr,fork VSOCK-CONNECT:\$ENCLAVE_CID:3000 &/a\\
-\\
-# Seal example: Expose port 3001 for localhost-only access to init endpoint\\
-echo \"Exposing seal init endpoint on localhost:3001...\"\\
-socat TCP4-LISTEN:3001,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:\$ENCLAVE_CID:3001 &" expose_enclave.sh
-        fi
     else
-        # Regular no-secret configuration
-        echo "Standard no-secret configuration applied."
-        
-        # Add empty secrets.json for compatibility with run.sh
-        if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "/# Secrets-block/a\\
-# No secrets: create empty secrets.json for compatibility\\
-echo '{}' > secrets.json\\
-" expose_enclave.sh
-        else
-            sed -i "/# Secrets-block/a\\
-# No secrets: create empty secrets.json for compatibility\\
+        sed -i "/# Secrets-block/a\\
+# Create empty secrets.json (required by run.sh)\\
+echo 'Creating empty secrets.json...'\\
 echo '{}' > secrets.json" expose_enclave.sh
-        fi
+        
+        # Expose port 3001 for localhost-only access to init endpoint
+        sed -i "/socat TCP4-LISTEN:3000,reuseaddr,fork VSOCK-CONNECT:\$ENCLAVE_CID:3000 &/a\\
+\\
+# Expose port 3001 for localhost-only access to init endpoint\\
+echo \"Exposing init endpoint on localhost:3001...\"\\
+socat TCP4-LISTEN:3001,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:\$ENCLAVE_CID:3001 &" expose_enclave.sh
     fi
 fi
 
@@ -379,17 +360,11 @@ sudo usermod -aG docker ec2-user
 sudo systemctl start nitro-enclaves-allocator.service && sudo systemctl enable nitro-enclaves-allocator.service
 sudo systemctl start docker && sudo systemctl enable docker
 sudo systemctl enable nitro-enclaves-vsock-proxy.service
-EOF
 
-# Add Rust installation for seal example only
-if [ "$IS_SEAL_EXAMPLE" = true ]; then
-    cat <<'EOF' >> user-data.sh
-
-# Install Rust and cargo for seal example
+# Install Rust and cargo
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | su - ec2-user -c "sh -s -- -y"
 echo 'source $HOME/.cargo/env' >> /home/ec2-user/.bashrc
 EOF
-fi
 
 # Append endpoint configuration to the vsock-proxy YAML if endpoints were provided.
 if [ -n "$ENDPOINTS" ]; then
@@ -494,22 +469,20 @@ rm "$tmp_traffic"
 
 echo "updated run.sh"
 
-# Add seal-specific vsock listener for port 3001
-if [ "$IS_SEAL_EXAMPLE" = true ]; then
-    echo "Adding seal-specific port 3001 vsock listener to run.sh..."
-    if [[ "$(uname)" == "Darwin" ]]; then
-        sed -i '' '/socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &/a\
+# Add vsock listener for port 3001
+echo "Adding port 3001 vsock listener to run.sh..."
+if [[ "$(uname)" == "Darwin" ]]; then
+    sed -i '' '/socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &/a\
 \
-# For seal-example: Listen on VSOCK Port 3001 and forward to localhost 3001\
+# Listen on VSOCK Port 3001 and forward to localhost 3001\
 socat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &' src/nautilus-server/run.sh
-    else
-        sed -i '/socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &/a\
+else
+    sed -i '/socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &/a\
 \
-# For seal-example: Listen on VSOCK Port 3001 and forward to localhost 3001\
+# Listen on VSOCK Port 3001 and forward to localhost 3001\
 socat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &' src/nautilus-server/run.sh
-    fi
-    echo "Added port 3001 vsock listener for seal example"
 fi
+echo "Added port 3001 vsock listener"
 
 ############################
 # Create or Use Security Group

@@ -9,8 +9,11 @@ ENCLAVE_CID=$(nitro-cli describe-enclaves | jq -r ".[0].EnclaveCID")
 
 sleep 5
 # Secrets-block
-# No secrets: create empty secrets.json for compatibility
+# Create empty secrets.json (required by run.sh)
+echo 'Creating empty secrets.json...'
 echo '{}' > secrets.json
+# Create empty secrets.json (required by run.sh)
+# No secrets: create empty secrets.json for compatibility
 # No secrets: create empty secrets.json for compatibility
 # No secrets: create empty secrets.json for compatibility
 # No secrets: create empty secrets.json for compatibility
@@ -18,5 +21,13 @@ echo '{}' > secrets.json
 
 cat secrets.json | socat - VSOCK-CONNECT:$ENCLAVE_CID:7777
 socat TCP4-LISTEN:3000,reuseaddr,fork VSOCK-CONNECT:$ENCLAVE_CID:3000 &
+
+# Expose port 3001 for localhost-only access to init endpoint
+echo "Exposing init endpoint on localhost:3001..."
+socat TCP4-LISTEN:3001,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:$ENCLAVE_CID:3001 &
+
+# Expose port 3001 for localhost-only access to init endpoint
+echo "Exposing seal init endpoint on localhost:3001..."
+socat TCP4-LISTEN:3001,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:$ENCLAVE_CID:3001 &
 
 # Additional port configurations will be added here by configure_enclave.sh if needed
