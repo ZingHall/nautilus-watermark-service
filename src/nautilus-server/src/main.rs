@@ -4,8 +4,8 @@
 use anyhow::Result;
 use axum::{routing::get, routing::post, Router};
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
-use nautilus_server::app::process_data;
 use nautilus_server::common::{get_attestation, health_check};
+use nautilus_server::zing_watermark::handlers::public::process_data;
 use nautilus_server::AppState;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -13,13 +13,11 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // we assign each Enclave an keypair when setup
     let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
-    let file_key = String::new();
 
-    let state = Arc::new(AppState { eph_kp, file_key });
+    let state = Arc::new(AppState { eph_kp });
 
-    nautilus_server::app::spawn_host_init_server(state.clone()).await?;
+    nautilus_server::zing_watermark::spawn_host_init_server(state.clone()).await?;
 
     // Define your own restricted CORS policy here if needed.
     let cors = CorsLayer::new().allow_methods(Any).allow_headers(Any);

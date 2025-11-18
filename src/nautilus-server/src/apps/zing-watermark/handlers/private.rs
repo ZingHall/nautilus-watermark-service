@@ -1,6 +1,3 @@
-// This file will be created to show the FILE_KEYS definition
-
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,42 +9,35 @@ use fastcrypto::traits::{KeyPair, Signer};
 use rand::thread_rng;
 use seal_sdk::types::{FetchKeyRequest, KeyId};
 use seal_sdk::{
-    genkey, seal_decrypt_all_objects, signed_message, signed_request, Certificate, ElGamalSecretKey,
+    seal_decrypt_all_objects, signed_message, signed_request, Certificate, EncryptedObject,
+    FetchKeyResponse,
 };
+use serde::{Deserialize, Serialize};
 use sui_sdk_types::{
     Address, Argument, Command, Identifier, Input, MoveCall, PersonalMessage,
     ProgrammableTransaction, TypeTag,
 };
-use tokio::sync::RwLock;
 
-use super::types::*;
+use crate::zing_watermark::{types::*, ENCRYPTION_KEYS, FILE_KEYS, SEAL_CONFIG};
 use crate::{AppState, EnclaveError};
 
-lazy_static::lazy_static! {
-    /// Configuration for Seal key servers, containing package
-    /// IDs, key server object IDs and public keys are hardcoded
-    /// here so they can be used to verify fetch key responses.
-    pub static ref SEAL_CONFIG: SealConfig = {
-        let config_str = include_str!("seal_config.yaml");
-        serde_yaml::from_str(config_str)
-            .expect("Failed to parse seal_config.yaml")
-    };
-    /// Encryption secret key generated initialized on startup.
-    pub static ref ENCRYPTION_KEYS: (ElGamalSecretKey, seal_sdk::types::ElGamalPublicKey, seal_sdk::types::ElgamalVerificationKey) = {
-        genkey(&mut thread_rng())
-    };
-
-   /// Maps: wallet address ? raw 32-byte FileKey (AES-256 key)
-    pub static ref FILE_KEYS: Arc<RwLock<HashMap<Address, Vec<u8>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
+#[derive(Serialize, Deserialize)]
+pub struct InitParameterLoadRequest {
+    pub enclave_object_id: Address,
+    pub initial_shared_version: u64,
+    // #[serde(deserialize_with = "deserialize_hex_vec")]
+    // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
+    #[serde(deserialize_with = "deserialize_wallet_addresses")]
+    pub wallet_addresses: Vec<Address>,
+    pub studio_initial_shared_versions: Vec<u64>,
 }
 
-/// This endpoint takes an enclave obj id with initial shared version
-/// and a list of key identities. It initializes the session key and
-/// uses state's ephemeral key to sign the personal message. Returns
-/// a Hex encoded BCS serialized FetchKeyRequest containing the certificate
-/// and the desired ptb for seal_approve. This is the first step for
-/// the bootstrap phase.
+/// Response for /init_parameter_load
+#[derive(Serialize, Deserialize)]
+pub struct InitParameterLoadResponse {
+    pub encoded_request: String,
+}
+
 pub async fn init_parameter_load(
     State(state): State<Arc<AppState>>,
     Json(request): Json<InitParameterLoadRequest>,
@@ -136,11 +126,17 @@ pub async fn init_parameter_load(
     }))
 }
 
-/// This endpoint accepts a list of encrypted objects and encoded seal responses,
-/// It parses the seal responses for all IDs and decrypt all encrypted objects
-/// with the encryption secret key. If all encrypted objects are decrypted, store
-/// the file keys in FILE_KEYS for future usage. Each decrypted result should be
-/// a 32-byte AES-256 file key that corresponds to a wallet address.
+/// Request for /complete_parameter_load
+#[derive(Serialize, Deserialize)]
+pub struct CompleteParameterLoadRequest {
+    #[serde(deserialize_with = "deserialize_wallet_addresses")]
+    pub wallet_addresses: Vec<Address>,
+    #[serde(deserialize_with = "deserialize_encrypted_objects")]
+    pub encrypted_objects: Vec<EncryptedObject>,
+    #[serde(deserialize_with = "deserialize_seal_responses")]
+    pub seal_responses: Vec<(Address, FetchKeyResponse)>,
+}
+
 pub async fn complete_parameter_load(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<CompleteParameterLoadRequest>,
@@ -191,6 +187,31 @@ pub async fn complete_parameter_load(
 
     Ok(Json(CompleteParameterLoadResponse {
         loaded_keys_count: decrypted_results.len(),
+    }))
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LoadFileKeysRequest {
+    pub enclave_object_id: Address,
+    pub initial_shared_version: u64,
+    // #[serde(deserialize_with = "deserialize_hex_vec")]
+    // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
+    #[serde(deserialize_with = "deserialize_wallet_addresses")]
+    pub wallet_addresses: Vec<Address>,
+    pub studio_initial_shared_versions: Vec<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LoadFileKeysResponse {
+    pub wallet_addresses: Vec<Address>,
+}
+
+fn fetch_keys(
+    State(_state): State<Arc<AppState>>,
+    Json(request): Json<LoadFileKeysRequest>,
+) -> Result<Json<LoadFileKeysResponse>, EnclaveError> {
+    Ok(Json(LoadFileKeysResponse {
+        wallet_addresses: vec![],
     }))
 }
 

@@ -9,23 +9,15 @@ use fastcrypto::ed25519::Ed25519KeyPair;
 use serde_json::json;
 use std::fmt;
 
-mod apps {
-    #[path = "zing-watermark/mod.rs"]
-    pub mod zing_watermark;
-}
-
-pub mod app {
-    pub use crate::apps::zing_watermark::*;
-}
-
 pub mod common;
+#[path = "apps/zing-watermark/mod.rs"]
+pub mod zing_watermark;
 
 /// App state, at minimum needs to maintain the ephemeral keypair.  
 pub struct AppState {
     /// Ephemeral keypair on boot
     pub eph_kp: Ed25519KeyPair,
-    /// API key when querying api.weatherapi.com
-    pub file_key: String,
+    // pub sui_client: SuiClient
 }
 
 /// Implement IntoResponse for EnclaveError.

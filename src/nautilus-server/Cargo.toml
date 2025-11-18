@@ -39,3 +39,4 @@ seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk" }
 # seal-example = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
 base64 = "0.22.1"
 aes-gcm = "0.10.3"
+sui-rpc = "0.1.0"

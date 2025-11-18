@@ -3,27 +3,27 @@
 
 use fastcrypto::encoding::{Encoding, Hex};
 use fastcrypto::serde_helpers::ToFromByteArray;
-use seal_sdk::types::FetchKeyResponse;
+use seal_sdk::types::{FetchKeyResponse, KeyId};
 use seal_sdk::{EncryptedObject, IBEPublicKey};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use sui_sdk_types::Address;
 
-/// Custom deserializer for hex strings to Vec<u8>
-// fn deserialize_hex_vec<'de, D>(deserializer: D) -> Result<Vec<KeyId>, D::Error>
-// where
-//     D: Deserializer<'de>,
-// {
-//     let hex_strings: Vec<String> = Vec::deserialize(deserializer)?;
-//     hex_strings
-//         .into_iter()
-//         .map(|s| Hex::decode(&s).map_err(serde::de::Error::custom))
-//         .collect()
-// }
+// Custom deserializer for hex strings to Vec<u8>
+pub fn deserialize_hex_vec<'de, D>(deserializer: D) -> Result<Vec<KeyId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let hex_strings: Vec<String> = Vec::deserialize(deserializer)?;
+    hex_strings
+        .into_iter()
+        .map(|s| Hex::decode(&s).map_err(serde::de::Error::custom))
+        .collect()
+}
 
 /// Custom deserializer for Vec of hex strings to Vec<Address>
-fn deserialize_wallet_addresses<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
+pub fn deserialize_wallet_addresses<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -77,7 +77,7 @@ where
 }
 
 /// Custom deserializer for hex string to Vec<(Address, FetchKeyResponse)>
-fn deserialize_seal_responses<'de, D>(
+pub fn deserialize_seal_responses<'de, D>(
     deserializer: D,
 ) -> Result<Vec<(Address, FetchKeyResponse)>, D::Error>
 where
@@ -91,7 +91,9 @@ where
 }
 
 /// Custom deserializer for hex string to Vec<EncryptedObject>
-fn deserialize_encrypted_objects<'de, D>(deserializer: D) -> Result<Vec<EncryptedObject>, D::Error>
+pub fn deserialize_encrypted_objects<'de, D>(
+    deserializer: D,
+) -> Result<Vec<EncryptedObject>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -156,35 +158,6 @@ impl TryFrom<SealConfigRaw> for SealConfig {
             studio_config_shared_object_id: raw.studio_config_shared_object_id,
         })
     }
-}
-
-/// Request for /init_parameter_load
-#[derive(Serialize, Deserialize)]
-pub struct InitParameterLoadRequest {
-    pub enclave_object_id: Address,
-    pub initial_shared_version: u64,
-    // #[serde(deserialize_with = "deserialize_hex_vec")]
-    // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
-    #[serde(deserialize_with = "deserialize_wallet_addresses")]
-    pub wallet_addresses: Vec<Address>,
-    pub studio_initial_shared_versions: Vec<u64>,
-}
-
-/// Response for /init_parameter_load
-#[derive(Serialize, Deserialize)]
-pub struct InitParameterLoadResponse {
-    pub encoded_request: String,
-}
-
-/// Request for /complete_parameter_load
-#[derive(Serialize, Deserialize)]
-pub struct CompleteParameterLoadRequest {
-    #[serde(deserialize_with = "deserialize_wallet_addresses")]
-    pub wallet_addresses: Vec<Address>,
-    #[serde(deserialize_with = "deserialize_encrypted_objects")]
-    pub encrypted_objects: Vec<EncryptedObject>,
-    #[serde(deserialize_with = "deserialize_seal_responses")]
-    pub seal_responses: Vec<(Address, FetchKeyResponse)>,
 }
 
 /// Response for /complete_parameter_load, for demo on decrypting many secrets.
