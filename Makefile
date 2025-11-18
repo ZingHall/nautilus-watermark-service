@@ -38,7 +38,7 @@ run-debug: out/nitro.eif
 	sudo nitro-cli \
 		run-enclave \
 		--cpu-count 2 \
-		--memory 512M \
+		--memory 256M \
 		--eif-path out/nitro.eif \
 		--debug-mode \
 		--attach-console
@@ -46,4 +46,3 @@ run-debug: out/nitro.eif
 .PHONY: update
 update:
 	./update.sh
-
