@@ -141,35 +141,42 @@ jobs:
         run: |
           echo "📝 Updating Terraform configuration..."
           
-          # Update eif_version in main.tf using Python for better reliability
+          # Update eif_version default value in variables.tf using Python
           python3 << 'PYTHON_SCRIPT'
           import re
           
-          with open('main.tf', 'r') as f:
+          with open('variables.tf', 'r') as f:
               content = f.read()
           
-          # Pattern to match eif_version line
-          pattern = r'eif_version\s*=\s*"[^"]*"'
-          replacement = f'eif_version    = "${{ steps.shorten-commit.outputs.sha_short }}"'
+          # Pattern to match eif_version default value in variables.tf
+          pattern = r'(variable\s+"eif_version"\s*\{[^}]*default\s*=\s*)"[^"]*"'
+          replacement = r'\1"${{ steps.shorten-commit.outputs.sha_short }}"'
           
           if re.search(pattern, content):
-              # Update existing eif_version
+              # Update existing eif_version default value
               content = re.sub(pattern, replacement, content)
           else:
-              # Add eif_version after s3_bucket_arn
-              content = re.sub(
-                  r'(s3_bucket_arn\s*=\s*[^\n]+)',
-                  r'\1\n  ' + replacement,
-                  content
-              )
+              # Fallback: try to find and update in main.tf (for backwards compatibility)
+              with open('main.tf', 'r') as f:
+                  main_content = f.read()
+              
+              main_pattern = r'eif_version\s*=\s*"[^"]*"'
+              main_replacement = f'eif_version    = "${{ steps.shorten-commit.outputs.sha_short }}"'
+              
+              if re.search(main_pattern, main_content):
+                  main_content = re.sub(main_pattern, main_replacement, main_content)
+                  with open('main.tf', 'w') as f:
+                      f.write(main_content)
+                  print("Updated eif_version in main.tf (fallback)")
+                  exit(0)
           
-          with open('main.tf', 'w') as f:
+          with open('variables.tf', 'w') as f:
               f.write(content)
           PYTHON_SCRIPT
           
-          echo "✅ Updated eif_version to ${{ steps.shorten-commit.outputs.sha_short }}"
+          echo "✅ Updated eif_version default to ${{ steps.shorten-commit.outputs.sha_short }}"
           echo "Changes:"
-          git diff main.tf || true
+          git diff variables.tf || git diff main.tf || true
 
       - name: Create Pull Request for Terraform changes
         if: |
