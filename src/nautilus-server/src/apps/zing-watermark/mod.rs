@@ -3,6 +3,7 @@ pub mod models;
 pub mod types;
 
 use crate::zing_watermark::handlers::private::fetch_keys;
+use crate::zing_watermark::handlers::private::setup;
 use crate::AppState;
 use crate::EnclaveError;
 use axum::Json;
@@ -18,6 +19,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use sui_sdk_types::Address;
+use sui_sdk_types::Input;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -35,12 +37,15 @@ lazy_static::lazy_static! {
         serde_yaml::from_str(config_str)
             .expect("Failed to parse seal_config.yaml")
     };
+    pub static ref ENCLAVE_OBJECT: Arc<RwLock<Option<Input>>> = {
+        Arc::new(RwLock::new(Option::None))
+    };
     /// Encryption secret key generated initialized on startup.
     pub static ref ENCRYPTION_KEYS: (ElGamalSecretKey, seal_sdk::types::ElGamalPublicKey, seal_sdk::types::ElgamalVerificationKey) = {
         genkey(&mut thread_rng())
     };
 
-   /// Maps: wallet address ? raw 32-byte FileKey (AES-256 key)
+   /// Maps: wallet address -> raw 32-byte FileKey (AES-256 key)
     pub static ref FILE_KEYS: Arc<RwLock<HashMap<Address, Vec<u8>>>> =
         Arc::new(RwLock::new(HashMap::new()));
 }
@@ -63,6 +68,7 @@ pub async fn ping() -> Json<PingResponse> {
 pub async fn spawn_host_init_server(state: Arc<AppState>) -> Result<(), EnclaveError> {
     let host_app = Router::new()
         .route("/ping", get(ping))
+        .route("/setup", post(setup))
         .route("/seal/init_parameter_load", post(init_parameter_load))
         .route(
             "/seal/complete_parameter_load",
