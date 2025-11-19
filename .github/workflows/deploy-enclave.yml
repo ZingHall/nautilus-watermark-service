@@ -1,0 +1,277 @@
+name: Deploy to Nitro Enclave
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Containerfile'
+      - 'Makefile'
+      - 'Cargo.toml'
+      - '.github/workflows/deploy-enclave.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      auto_apply:
+        description: 'Automatically apply Terraform changes'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_ACCOUNT_ID: 287767576800
+  AWS_REGION: ap-northeast-1
+  ENCLAVE_APP: zing-watermark
+  S3_BUCKET_STAGING: zing-enclave-artifacts-staging
+  S3_BUCKET_PRODUCTION: zing-enclave-artifacts-production
+  EIF_PATH_STAGING: eif/staging
+  EIF_PATH_PRODUCTION: eif/production
+
+jobs:
+  deploy:
+    name: Deploy to Nitro Enclave
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          else
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          fi
+          echo "Deploying to: ${{ steps.env.outputs.environment }}"
+
+      - name: Shorten commit hash
+        id: shorten-commit
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Set S3 bucket and path
+        id: s3
+        run: |
+          if [ "${{ steps.env.outputs.environment }}" == "production" ]; then
+            echo "bucket=${{ env.S3_BUCKET_PRODUCTION }}" >> $GITHUB_OUTPUT
+            echo "path=${{ env.EIF_PATH_PRODUCTION }}" >> $GITHUB_OUTPUT
+          else
+            echo "bucket=${{ env.S3_BUCKET_STAGING }}" >> $GITHUB_OUTPUT
+            echo "path=${{ env.EIF_PATH_STAGING }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-cicd-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check if EIF already exists in S3
+        id: check-eif
+        run: |
+          EIF_S3_PATH="s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif"
+          if aws s3 ls "$EIF_S3_PATH" 2>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ EIF file already exists in S3, skipping build"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ EIF file not found, will build new one"
+          fi
+
+      - name: Build EIF file
+        if: steps.check-eif.outputs.exists == 'false'
+        run: |
+          echo "🔨 Building EIF file..."
+          make ENCLAVE_APP=${{ env.ENCLAVE_APP }}
+          
+          if [ ! -f "out/nitro.eif" ]; then
+            echo "❌ EIF file not found after build"
+            exit 1
+          fi
+          
+          echo "✅ EIF file built successfully"
+          ls -lh out/nitro.eif
+
+      - name: Upload EIF to S3
+        if: steps.check-eif.outputs.exists == 'false'
+        id: upload-eif
+        run: |
+          EIF_S3_PATH="s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif"
+          echo "📤 Uploading EIF to $EIF_S3_PATH"
+          
+          aws s3 cp out/nitro.eif "$EIF_S3_PATH" \
+            --metadata "commit=${{ github.sha }},commit_short=${{ steps.shorten-commit.outputs.sha_short }},build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
+          echo "eif_path=$EIF_S3_PATH" >> $GITHUB_OUTPUT
+          echo "✅ EIF uploaded successfully"
+
+      - name: Checkout infrastructure repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/zing-infra
+          path: zing-infra
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+          terraform_wrapper: false
+
+      - name: Update Terraform EIF version
+        working-directory: zing-infra/environments/${{ steps.env.outputs.environment }}/nautilus-enclave
+        run: |
+          echo "📝 Updating Terraform configuration..."
+          
+          # Update eif_version in main.tf using Python for better reliability
+          python3 << 'PYTHON_SCRIPT'
+          import re
+          
+          with open('main.tf', 'r') as f:
+              content = f.read()
+          
+          # Pattern to match eif_version line
+          pattern = r'eif_version\s*=\s*"[^"]*"'
+          replacement = f'eif_version    = "${{ steps.shorten-commit.outputs.sha_short }}"'
+          
+          if re.search(pattern, content):
+              # Update existing eif_version
+              content = re.sub(pattern, replacement, content)
+          else:
+              # Add eif_version after s3_bucket_arn
+              content = re.sub(
+                  r'(s3_bucket_arn\s*=\s*[^\n]+)',
+                  r'\1\n  ' + replacement,
+                  content
+              )
+          
+          with open('main.tf', 'w') as f:
+              f.write(content)
+          PYTHON_SCRIPT
+          
+          echo "✅ Updated eif_version to ${{ steps.shorten-commit.outputs.sha_short }}"
+          echo "Changes:"
+          git diff main.tf || true
+
+      - name: Create Pull Request for Terraform changes
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'production') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply != 'true')
+        working-directory: zing-infra
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH_NAME="update-enclave-eif-${{ steps.shorten-commit.outputs.sha_short }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git checkout -b "$BRANCH_NAME"
+          git add environments/${{ steps.env.outputs.environment }}/nautilus-enclave/main.tf
+          git commit -m "chore: update enclave EIF version to ${{ steps.shorten-commit.outputs.sha_short }}
+
+          - EIF file: s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif
+          - Source commit: ${{ github.sha }}
+          - Environment: ${{ steps.env.outputs.environment }}"
+          
+          # Check if PR already exists
+          PR_EXISTS=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          
+          if [ -z "$PR_EXISTS" ]; then
+            gh pr create \
+              --title "Update Enclave EIF Version to ${{ steps.shorten-commit.outputs.sha_short }}" \
+              --body "This PR updates the EIF version for the ${{ steps.env.outputs.environment }} environment.
+              
+          **Changes:**
+          - EIF Version: \`${{ steps.shorten-commit.outputs.sha_short }}\`
+          - S3 Path: \`s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif\`
+          - Source Commit: ${{ github.sha }}
+          
+          **Next Steps:**
+          1. Review the Terraform changes
+          2. Merge this PR to apply the update
+          3. Or run \`terraform apply\` manually in the environment directory" \
+              --base main
+          else
+            echo "PR already exists: #$PR_EXISTS"
+            git push origin "$BRANCH_NAME" --force
+          fi
+
+      - name: Apply Terraform changes
+        if: |
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply == 'true') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'staging')
+        working-directory: zing-infra/environments/${{ steps.env.outputs.environment }}/nautilus-enclave
+        env:
+          TF_BACKEND_BUCKET: terraform-zing-${{ steps.env.outputs.environment }}
+          TF_BACKEND_KEY: nautilus-enclave.tfstate
+          TF_BACKEND_REGION: ${{ env.AWS_REGION }}
+          TF_BACKEND_DYNAMODB_TABLE: terraform-lock-table
+        run: |
+          echo "🚀 Applying Terraform changes..."
+          
+          # Initialize Terraform with backend config (without profile for OIDC)
+          terraform init \
+            -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            -backend-config="key=$TF_BACKEND_KEY" \
+            -backend-config="region=$TF_BACKEND_REGION" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=$TF_BACKEND_DYNAMODB_TABLE"
+          
+          terraform plan \
+            -var="eif_version=${{ steps.shorten-commit.outputs.sha_short }}"
+          
+          terraform apply -auto-approve \
+            -var="eif_version=${{ steps.shorten-commit.outputs.sha_short }}"
+          
+          echo "✅ Terraform applied successfully"
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == 'success' ]; then
+            echo "✅ Deployment to ${{ steps.env.outputs.environment }} successful!"
+          else
+            echo "❌ Deployment to ${{ steps.env.outputs.environment }} failed!"
+          fi
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ steps.env.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**EIF Version:** \`${{ steps.shorten-commit.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**S3 Path:** \`s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Source Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.check-eif.outputs.exists }}" == "true" ]; then
+            echo "✅ EIF file already existed in S3, skipped build" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ EIF file built and uploaded successfully" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ github.event.inputs.auto_apply }}" == "true" ]; then
+            echo "✅ Terraform changes applied automatically" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ github.event_name }}" == "push" ] && [ "${{ steps.env.outputs.environment }}" == "staging" ]; then
+            echo "✅ Terraform changes applied automatically (staging auto-deploy)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "📝 Pull Request created for Terraform changes" >> $GITHUB_STEP_SUMMARY
+            echo "   Review and merge to apply the update" >> $GITHUB_STEP_SUMMARY
+          fi
+
