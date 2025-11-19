@@ -31,7 +31,8 @@ regex = { version = "1.5", optional = true }
 
 sui-sdk-types = { version = "0.1.0", features = ["serde"] }
 sui-crypto = { version = "0.1.0", features = ["ed25519"] }
-seal-sdk = { path = "../../../seal/crates/seal-sdk/" }
+# Pinned to a stable commit for reproducible builds
+seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk", path = "crates/seal-sdk", rev = "7b4e8c39e9b9a2ef350d64c4f48cfa046ed21e8e" }
 
 # [features]
 # weather-example = []
