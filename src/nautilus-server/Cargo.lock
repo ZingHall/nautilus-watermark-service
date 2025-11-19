@@ -492,12 +492,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f781dba93de3a5ef6dc5b17c9958b208f6f3f021623b360fb605ea51ce443f10"
 
 [[package]]
-name = "bnum"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "119771309b95163ec7aaf79810da82f7cd0599c19722d48b9c03894dca833966"
-
-[[package]]
 name = "bs58"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -645,7 +639,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_with",
- "sui-sdk-types 0.0.8",
+ "sui-sdk-types",
  "typenum",
 ]
 
@@ -1484,7 +1478,7 @@ dependencies = [
  "hyper 1.6.0",
  "libc",
  "pin-project-lite",
- "socket2 0.6.0",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1874,7 +1868,7 @@ dependencies = [
  "serde_yaml",
  "sui-crypto",
  "sui-rpc",
- "sui-sdk-types 0.0.8",
+ "sui-sdk-types",
  "tokio",
  "tower-http",
  "tracing",
@@ -2223,9 +2217,9 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.14.1"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7231bd9b3d3d33c86b58adbac74b5ec0ad9f496b19d22801d773636feaa95f3d"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
 dependencies = [
  "bytes",
  "prost-derive",
@@ -2233,12 +2227,12 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.14.1"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.105",
@@ -2246,9 +2240,9 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
-version = "0.14.1"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9b4db3d6da204ed77bb26ba83b6122a73aeb2e87e25fbf7ad2e84c4ccbf8f72"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
 dependencies = [
  "prost",
 ]
@@ -2442,16 +2436,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "roaring"
-version = "0.11.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f08d6a905edb32d74a5d5737a0c9d7e950c312f3c46cb0ca0a2ca09ea11878a0"
-dependencies = [
- "bytemuck",
- "byteorder",
-]
-
-[[package]]
 name = "rsa"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2630,7 +2614,7 @@ dependencies = [
  "fastcrypto",
  "serde",
  "serde_json",
- "sui-sdk-types 0.0.8",
+ "sui-sdk-types",
  "tracing",
 ]
 
@@ -3003,14 +2987,14 @@ dependencies = [
  "ed25519-dalek",
  "rand_core",
  "signature",
- "sui-sdk-types 0.0.8",
+ "sui-sdk-types",
 ]
 
 [[package]]
 name = "sui-rpc"
-version = "0.1.0"
+version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a931ef96b890a118f12b6fa1dda727b8b6df82af3bdb5568c5257078a54c5ba8"
+checksum = "0619337910d280dc5baa8e7e0dd5a6b01141e453e795f9bdea3c1ef8dc42a14a"
 dependencies = [
  "base64 0.22.1",
  "bcs",
@@ -3021,11 +3005,10 @@ dependencies = [
  "prost-types",
  "serde",
  "serde_json",
- "sui-sdk-types 0.1.0",
+ "sui-sdk-types",
  "tap",
  "tokio",
  "tonic",
- "tonic-prost",
 ]
 
 [[package]]
@@ -3037,34 +3020,12 @@ dependencies = [
  "base64ct",
  "bcs",
  "blake2",
- "bnum 0.12.1",
+ "bnum",
  "bs58 0.5.1",
  "bytes",
  "bytestring",
  "itertools 0.13.0",
- "roaring 0.10.12",
- "serde",
- "serde_derive",
- "serde_json",
- "serde_with",
- "winnow",
-]
-
-[[package]]
-name = "sui-sdk-types"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df9497600faf5a1fb07a2db85902515867ad30474abf959de1a7d1fa473c4a28"
-dependencies = [
- "base64ct",
- "bcs",
- "blake2",
- "bnum 0.13.0",
- "bs58 0.5.1",
- "bytes",
- "bytestring",
- "itertools 0.14.0",
- "roaring 0.11.2",
+ "roaring",
  "serde",
  "serde_derive",
  "serde_json",
@@ -3319,9 +3280,9 @@ dependencies = [
 
 [[package]]
 name = "tonic"
-version = "0.14.2"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb7613188ce9f7df5bfe185db26c5814347d110db17920415cf2fbcad85e7203"
+checksum = "7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3334,7 +3295,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "sync_wrapper 1.0.2",
+ "prost",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -3342,19 +3303,8 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots",
+ "webpki-roots 0.26.11",
  "zstd",
-]
-
-[[package]]
-name = "tonic-prost"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66bd50ad6ce1252d87ef024b3d64fe4c3cf54a86fb9ef4c631fdd0ded7aeaa67"
-dependencies = [
- "bytes",
- "prost",
- "tonic",
 ]
 
 [[package]]
@@ -3617,6 +3567,15 @@ checksum = "33b6dd2ef9186f1f2072e409e99cd22a975331a6b3591b12c764e0e55c60d5d2"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "0.26.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
+dependencies = [
+ "webpki-roots 1.0.4",
 ]
 
 [[package]]

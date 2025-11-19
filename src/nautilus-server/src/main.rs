@@ -8,14 +8,17 @@ use nautilus_server::common::{get_attestation, health_check};
 use nautilus_server::zing_watermark::handlers::public::process_data;
 use nautilus_server::AppState;
 use std::sync::Arc;
+use sui_rpc::Client;
+use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
+    let sui_client = Arc::new(Mutex::new(Client::new(Client::TESTNET_FULLNODE)?));
 
-    let state = Arc::new(AppState { eph_kp });
+    let state = Arc::new(AppState { eph_kp, sui_client });
 
     nautilus_server::zing_watermark::spawn_host_init_server(state.clone()).await?;
 

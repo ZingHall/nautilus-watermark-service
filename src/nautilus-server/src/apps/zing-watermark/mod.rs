@@ -1,6 +1,8 @@
 pub mod handlers;
+pub mod models;
 pub mod types;
 
+use crate::zing_watermark::handlers::private::fetch_keys;
 use crate::AppState;
 use crate::EnclaveError;
 use axum::Json;
@@ -66,6 +68,7 @@ pub async fn spawn_host_init_server(state: Arc<AppState>) -> Result<(), EnclaveE
             "/seal/complete_parameter_load",
             post(complete_parameter_load),
         )
+        .route("/fetch_keys", post(fetch_keys))
         .with_state(state);
 
     let host_listener = TcpListener::bind("0.0.0.0:3001")

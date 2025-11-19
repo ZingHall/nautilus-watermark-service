@@ -13,11 +13,16 @@ use seal_sdk::{
     FetchKeyResponse,
 };
 use serde::{Deserialize, Serialize};
+use sui_rpc::field::{FieldMask, FieldMaskUtil};
+use sui_rpc::proto::sui::rpc::v2beta2::{
+    BatchGetObjectsRequest, GetObjectRequest, GetObjectResult,
+};
 use sui_sdk_types::{
     Address, Argument, Command, Identifier, Input, MoveCall, PersonalMessage,
     ProgrammableTransaction, TypeTag,
 };
 
+use crate::zing_watermark::models::Studio;
 use crate::zing_watermark::{types::*, ENCRYPTION_KEYS, FILE_KEYS, SEAL_CONFIG};
 use crate::{AppState, EnclaveError};
 
@@ -203,16 +208,120 @@ pub struct LoadFileKeysRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct LoadFileKeysResponse {
-    pub wallet_addresses: Vec<Address>,
+    pub successes: Vec<Address>,
+    pub failures: Vec<Address>,
 }
 
-fn fetch_keys(
-    State(_state): State<Arc<AppState>>,
+pub async fn fetch_keys(
+    State(state): State<Arc<AppState>>,
     Json(request): Json<LoadFileKeysRequest>,
 ) -> Result<Json<LoadFileKeysResponse>, EnclaveError> {
+    let mut client = state.sui_client.lock().await;
+
+    let mut test_request = sui_rpc::proto::sui::rpc::v2beta2::GetObjectRequest::default();
+    test_request.object_id =
+        Some("0x5066a6fd4e47214abdf0491fffe89fc0e28efab0f314c43935308be719d9a387".to_string());
+    test_request.read_mask = Some(FieldMask {
+        paths: vec!["bcs".to_string()],
+    });
+
+    println!("test_request:{test_request:?}");
+    let response = client
+        .ledger_client()
+        .get_object(test_request)
+        .await
+        .map(|r| r.into_inner())
+        .map_err(|e| EnclaveError::GenericError(format!("Time error: {e}")))?;
+
+    println!("response:{response:?}");
+
+    // Build requests for each derived Studio ID
+    let mut studio_ids = Vec::new();
+    let requests: Vec<GetObjectRequest> = request
+        .wallet_addresses
+        .iter()
+        .map(|addr| {
+            let studio_id = SEAL_CONFIG
+                .studio_config_shared_object_id
+                .derive_object_id(&TypeTag::Address, addr.as_bytes());
+            studio_ids.push((*addr, studio_id));
+
+            // Log the derived studio ID for debugging
+            println!("Wallet address: {addr}, Derived studio ID: {studio_id}");
+
+            GetObjectRequest::new(&studio_id).with_read_mask(FieldMask::from_str("contents"))
+        })
+        .collect();
+
+    // Fetch all studios (some may be missing)
+    let response = client
+        .ledger_client()
+        .batch_get_objects(BatchGetObjectsRequest::const_default().with_requests(requests))
+        .await
+        .map_err(|e| EnclaveError::GenericError(format!("Time error: {e}")))?
+        .into_inner();
+
+    // Split success + failed results
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+
+    for ((wallet_addr, studio_id), result) in
+        studio_ids.into_iter().zip(response.objects.into_iter())
+    {
+        match parse_studio_from_result(result) {
+            Ok(Some(studio)) => {
+                if studio.encrypted_file_key.is_some() {
+                    successes.push(wallet_addr);
+                } else {
+                    failures.push(wallet_addr);
+                };
+            }
+            Ok(None) => {
+                // Studio exists but encrypted_file_key = None
+                failures.push(wallet_addr);
+            }
+            Err(_err) => {
+                // Studio missing, or parsing failed
+                failures.push(wallet_addr);
+            }
+        }
+    }
+
     Ok(Json(LoadFileKeysResponse {
-        wallet_addresses: vec![],
+        successes,
+        failures,
     }))
+}
+
+fn parse_studio_from_result(result: GetObjectResult) -> Result<Option<Studio>, EnclaveError> {
+    if let Some(status) = result.error_opt() {
+        // If status.code != 0 ? actual error
+        if status.code != 0 {
+            return Err(EnclaveError::GenericError(format!(
+                "RPC error {}: {}",
+                status.code, status.message
+            )));
+        }
+    }
+
+    // Extract the Object struct
+    let Some(object) = result.object_opt() else {
+        return Ok(None);
+    };
+
+    // Extract BCS field
+    let Some(bcs) = &object.bcs else {
+        return Ok(None);
+    };
+
+    let Some(bytes) = &bcs.value else {
+        return Ok(None);
+    };
+
+    let studio: Studio = bcs::from_bytes(&bytes)
+        .map_err(|e| EnclaveError::GenericError(format!("BCS decode Studio failed: {e}")))?;
+
+    Ok(Some(studio))
 }
 
 /// Helper function that creates a PTB with multiple commands for
@@ -278,4 +387,48 @@ async fn create_ptb(
         commands.push(Command::MoveCall(move_call));
     }
     Ok(ProgrammableTransaction { inputs, commands })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::AppState;
+    use std::sync::Arc;
+    use sui_rpc::client::Client;
+    use sui_sdk_types::Address;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn test_fetch_keys_returns_file_key() {
+        // Prepare a wallet address
+        let wallet_address: Address =
+            "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
+                .parse()
+                .unwrap();
+
+        let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
+        let sui_client = Arc::new(Mutex::new(Client::new(Client::TESTNET_FULLNODE).unwrap()));
+        let state = Arc::new(AppState { eph_kp, sui_client });
+
+        let request = LoadFileKeysRequest {
+            enclave_object_id: "0x11dff7b6f3e8ff71c09d64b5157d521f2b6e3d3bdd445442a57f857749bdc5de"
+                .parse()
+                .unwrap(),
+            initial_shared_version: 645292726,
+            wallet_addresses: vec![wallet_address],
+            studio_initial_shared_versions: vec![645292722],
+        };
+
+        let response = fetch_keys(State(state), Json(request)).await;
+
+        match response {
+            Ok(json) => {
+                println!("Successes: {:?}", json.0.successes);
+                println!("Failures: {:?}", json.0.failures);
+            }
+            Err(e) => {
+                println!("Error fetching keys: {e:?}");
+            }
+        }
+    }
 }

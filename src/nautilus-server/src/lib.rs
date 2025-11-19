@@ -8,6 +8,9 @@ use axum::Json;
 use fastcrypto::ed25519::Ed25519KeyPair;
 use serde_json::json;
 use std::fmt;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use sui_rpc::Client;
 
 pub mod common;
 #[path = "apps/zing-watermark/mod.rs"]
@@ -17,7 +20,7 @@ pub mod zing_watermark;
 pub struct AppState {
     /// Ephemeral keypair on boot
     pub eph_kp: Ed25519KeyPair,
-    // pub sui_client: SuiClient
+    pub sui_client: Arc<Mutex<Client>>,
 }
 
 /// Implement IntoResponse for EnclaveError.
@@ -42,7 +45,7 @@ pub enum EnclaveError {
 impl fmt::Display for EnclaveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EnclaveError::GenericError(e) => write!(f, "{}", e),
+            EnclaveError::GenericError(e) => write!(f, "{e}"),
         }
     }
 }
