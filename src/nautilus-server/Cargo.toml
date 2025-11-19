@@ -29,9 +29,9 @@ lazy_static = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
 regex = { version = "1.5", optional = true }
 
-sui-sdk-types = { version = "0.0.8", features = ["serde"] }
-sui-crypto = { version = "0.0.8", features = ["ed25519"] }
-seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk" }
+sui-sdk-types = { version = "0.1.0", features = ["serde"] }
+sui-crypto = { version = "0.1.0", features = ["ed25519"] }
+seal-sdk = { path = "../../../seal/crates/seal-sdk/" }
 
 # [features]
 # weather-example = []
@@ -39,4 +39,4 @@ seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk" }
 # seal-example = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
 base64 = "0.22.1"
 aes-gcm = "0.10.3"
-sui-rpc = "0.0.8"
+sui-rpc = "0.1.0"

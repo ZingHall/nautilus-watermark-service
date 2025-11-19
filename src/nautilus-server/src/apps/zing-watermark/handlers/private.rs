@@ -14,9 +14,7 @@ use seal_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use sui_rpc::field::{FieldMask, FieldMaskUtil};
-use sui_rpc::proto::sui::rpc::v2beta2::{
-    BatchGetObjectsRequest, GetObjectRequest, GetObjectResult,
-};
+use sui_rpc::proto::sui::rpc::v2::{BatchGetObjectsRequest, GetObjectRequest, GetObjectResult};
 use sui_sdk_types::{
     Address, Argument, Command, Identifier, Input, MoveCall, PersonalMessage,
     ProgrammableTransaction, TypeTag,
@@ -218,7 +216,7 @@ pub async fn fetch_keys(
 ) -> Result<Json<LoadFileKeysResponse>, EnclaveError> {
     let mut client = state.sui_client.lock().await;
 
-    let mut test_request = sui_rpc::proto::sui::rpc::v2beta2::GetObjectRequest::default();
+    let mut test_request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::default();
     test_request.object_id =
         Some("0x5066a6fd4e47214abdf0491fffe89fc0e28efab0f314c43935308be719d9a387".to_string());
     test_request.read_mask = Some(FieldMask {
