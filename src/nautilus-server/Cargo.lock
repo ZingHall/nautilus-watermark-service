@@ -594,6 +594,7 @@ dependencies = [
 [[package]]
 name = "crypto"
 version = "0.5.13"
+source = "git+https://github.com/Jarekkkkk/seal?branch=jarek#94e0362a2fedcae67c587c938071b90338f1fab6"
 dependencies = [
  "bcs",
  "fastcrypto",
@@ -2521,6 +2522,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "seal-sdk"
 version = "0.5.13"
+source = "git+https://github.com/Jarekkkkk/seal?branch=jarek#94e0362a2fedcae67c587c938071b90338f1fab6"
 dependencies = [
  "bcs",
  "chrono",
