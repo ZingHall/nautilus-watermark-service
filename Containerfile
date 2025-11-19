@@ -56,6 +56,8 @@ ENV OPENSSL_STATIC=true
 ENV TARGET=x86_64-unknown-linux-musl
 ARG ENCLAVE_APP
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static"
+# Update Cargo.lock if needed, then build with --locked for reproducibility
+RUN cargo update || true
 RUN cargo build --locked --no-default-features --features $ENCLAVE_APP --release --target "$TARGET"
 
 WORKDIR /build_cpio
@@ -97,12 +99,12 @@ EOF
 
 WORKDIR /build_eif
 RUN eif_build \
-	--kernel /bzImage \
-	--kernel_config /linux.config \
-	--ramdisk /build_cpio/rootfs.cpio \
-	--pcrs_output /nitro.pcrs \
-	--output /nitro.eif \
-	--cmdline 'reboot=k initrd=0x2000000,3228672 root=/dev/ram0 panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh'
+    --kernel /bzImage \
+    --kernel_config /linux.config \
+    --ramdisk /build_cpio/rootfs.cpio \
+    --pcrs_output /nitro.pcrs \
+    --output /nitro.eif \
+    --cmdline 'reboot=k initrd=0x2000000,3228672 root=/dev/ram0 panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh'
 
 FROM base AS install
 WORKDIR /rootfs

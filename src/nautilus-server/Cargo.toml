@@ -29,11 +29,11 @@ lazy_static = "1.4"
 uuid = { version = "1.0", features = ["v4"] }
 regex = { version = "1.5", optional = true }
 
-sui-sdk-types = { version = "0.1.0", features = ["serde"], optional = true }
+# Using versions from nautilus seal-updates branch
+# Reference: https://github.com/MystenLabs/nautilus/blob/seal-updates/src/nautilus-server/Cargo.toml
+sui-sdk-types = { version = "0.1.0", features = ["serde", "hash"], optional = true }
 sui-crypto = { version = "0.1.0", features = ["ed25519"], optional = true }
-# Pinned to a stable commit for reproducible builds
-# Using package parameter to reference workspace member from git repository
-seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk", rev = "7b4e8c39e9b9a2ef350d64c4f48cfa046ed21e8e", optional = true }
+seal-sdk = { git = "https://github.com/MystenLabs/seal", rev = "f3d04de66d6ad2393987639a74d6fd545fb43995", package = "seal-sdk", optional = true }
 
 base64 = "0.22.1"
 aes-gcm = "0.10.3"

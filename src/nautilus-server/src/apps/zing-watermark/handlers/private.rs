@@ -9,8 +9,8 @@ use fastcrypto::traits::{KeyPair, Signer};
 use rand::thread_rng;
 use seal_sdk::types::{FetchKeyRequest, KeyId};
 use seal_sdk::{
-    seal_decrypt_all_objects, signed_message, signed_request, Certificate, EncryptedObject,
-    FetchKeyResponse,
+    decrypt_seal_responses, seal_decrypt_object, signed_message, signed_request, Certificate,
+    EncryptedObject, FetchKeyResponse,
 };
 use serde::{Deserialize, Serialize};
 use sui_rpc::field::{FieldMask, FieldMaskUtil};
@@ -21,7 +21,9 @@ use sui_sdk_types::{
 };
 
 use crate::zing_watermark::models::Studio;
-use crate::zing_watermark::{types::*, ENCRYPTION_KEYS, FILE_KEYS, SEAL_CONFIG};
+use crate::zing_watermark::{
+    types::*, CACHED_KEYS, ENCRYPTION_KEYS, FILE_KEYS, SEAL_CONFIG,
+};
 use crate::{AppState, EnclaveError};
 
 #[derive(Serialize, Deserialize)]
@@ -144,15 +146,45 @@ pub async fn complete_parameter_load(
     State(_state): State<Arc<AppState>>,
     Json(request): Json<CompleteParameterLoadRequest>,
 ) -> Result<Json<CompleteParameterLoadResponse>, EnclaveError> {
-    // Load the encryption secret key and try decrypting all encrypted objects.
+    // Reference: https://github.com/MystenLabs/nautilus/blob/seal-updates/src/nautilus-server/src/apps/seal-example/endpoints.rs
+    // Decrypt ALL keys from ALL servers and cache them
     let (enc_secret, _enc_key, _enc_verification_key) = &*ENCRYPTION_KEYS;
-    let decrypted_results = seal_decrypt_all_objects(
+    let seal_keys = decrypt_seal_responses(
         enc_secret,
         &request.seal_responses,
-        &request.encrypted_objects,
         &SEAL_CONFIG.server_pk_map,
     )
-    .map_err(|e| EnclaveError::GenericError(format!("Failed to decrypt objects: {e}")))?;
+    .map_err(|e| EnclaveError::GenericError(format!("Failed to decrypt seal responses: {e}")))?;
+
+    // Cache the keys for later use.
+    CACHED_KEYS.write().await.extend(seal_keys);
+
+    // Now decrypt all encrypted objects using cached keys
+    // seal_decrypt_object expects &HashMap<Vec<u8>, HashMap<Address, G1Element>>
+    // so we pass the entire CACHED_KEYS map
+    let cached_keys_read = CACHED_KEYS.read().await;
+    let mut decrypted_results = Vec::new();
+
+    for (idx, encrypted_object) in request.encrypted_objects.iter().enumerate() {
+        let wallet_addr = &request.wallet_addresses[idx];
+
+        // Decrypt the object using cached keys (pass entire map)
+        let decrypted_bytes = seal_decrypt_object(
+            encrypted_object,
+            &*cached_keys_read,
+            &SEAL_CONFIG.server_pk_map,
+        )
+        .map_err(|e| {
+            EnclaveError::GenericError(format!(
+                "Failed to decrypt object for wallet {}: {e}",
+                wallet_addr
+            ))
+        })?;
+
+        decrypted_results.push(decrypted_bytes);
+    }
+
+    drop(cached_keys_read); // Release the read lock
 
     if decrypted_results.is_empty() {
         return Err(EnclaveError::GenericError(
@@ -263,7 +295,7 @@ pub async fn fetch_keys(
     let mut successes = Vec::new();
     let mut failures = Vec::new();
 
-    for ((wallet_addr, studio_id), result) in
+    for ((wallet_addr, _studio_id), result) in
         studio_ids.into_iter().zip(response.objects.into_iter())
     {
         match parse_studio_from_result(result) {
