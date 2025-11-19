@@ -27,12 +27,19 @@ pub struct Member {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VecMap<K, V> {
-    pub entries: Vec<(K, V)>,
+    pub contents: Vec<Entry<K, V>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Entry<K, V> {
+    key: K,
+    value: V,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DerivedTable<K, V> {
     pub id: Address,
+    pub size: u64,
     #[serde(skip)]
     pub _phantom: PhantomData<(K, V)>,
 }
@@ -40,4 +47,5 @@ pub struct DerivedTable<K, V> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DerivedObjectBag {
     pub id: Address,
+    pub size: u64,
 }

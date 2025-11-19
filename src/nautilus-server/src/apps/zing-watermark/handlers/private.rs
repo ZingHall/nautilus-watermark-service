@@ -216,25 +216,6 @@ pub async fn fetch_keys(
 ) -> Result<Json<LoadFileKeysResponse>, EnclaveError> {
     let mut client = state.sui_client.lock().await;
 
-    let mut test_request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::default();
-    test_request.object_id =
-        Some("0x5066a6fd4e47214abdf0491fffe89fc0e28efab0f314c43935308be719d9a387".to_string());
-    test_request.read_mask = Some(FieldMask {
-        paths: vec!["bcs".to_string()],
-    });
-
-    println!("test_request:{test_request:?}");
-    let response = client
-        .ledger_client()
-        .get_object(test_request)
-        .await
-        .map(|r| r.into_inner())
-        .map_err(|e| EnclaveError::GenericError(format!("Time error: {e}")))?;
-
-    println!("response:{response:?}");
-
-    // Build requests for each derived Studio ID
-    let mut studio_ids = Vec::new();
     let requests: Vec<GetObjectRequest> = request
         .wallet_addresses
         .iter()
@@ -242,29 +223,32 @@ pub async fn fetch_keys(
             let studio_id = SEAL_CONFIG
                 .studio_config_shared_object_id
                 .derive_object_id(&TypeTag::Address, addr.as_bytes());
-            studio_ids.push((*addr, studio_id));
-
-            // Log the derived studio ID for debugging
-            println!("Wallet address: {addr}, Derived studio ID: {studio_id}");
-
-            GetObjectRequest::new(&studio_id).with_read_mask(FieldMask::from_str("contents"))
+            GetObjectRequest::new(&studio_id)
         })
         .collect();
 
     // Fetch all studios (some may be missing)
     let response = client
         .ledger_client()
-        .batch_get_objects(BatchGetObjectsRequest::const_default().with_requests(requests))
+        .batch_get_objects(
+            BatchGetObjectsRequest::const_default()
+                .with_requests(requests)
+                .with_read_mask(FieldMask::from_str("contents")),
+        )
         .await
         .map_err(|e| EnclaveError::GenericError(format!("Time error: {e}")))?
         .into_inner();
+
+    println!("response: {response:?}");
 
     // Split success + failed results
     let mut successes = Vec::new();
     let mut failures = Vec::new();
 
-    for ((wallet_addr, studio_id), result) in
-        studio_ids.into_iter().zip(response.objects.into_iter())
+    for (wallet_addr, result) in request
+        .wallet_addresses
+        .into_iter()
+        .zip(response.objects.into_iter())
     {
         match parse_studio_from_result(result) {
             Ok(Some(studio)) => {
@@ -292,8 +276,8 @@ pub async fn fetch_keys(
 }
 
 fn parse_studio_from_result(result: GetObjectResult) -> Result<Option<Studio>, EnclaveError> {
+    // Handle RPC error from the server
     if let Some(status) = result.error_opt() {
-        // If status.code != 0 ? actual error
         if status.code != 0 {
             return Err(EnclaveError::GenericError(format!(
                 "RPC error {}: {}",
@@ -302,21 +286,23 @@ fn parse_studio_from_result(result: GetObjectResult) -> Result<Option<Studio>, E
         }
     }
 
-    // Extract the Object struct
+    // Extract the Object
     let Some(object) = result.object_opt() else {
         return Ok(None);
     };
 
-    // Extract BCS field
-    let Some(bcs) = &object.bcs else {
+    // ---- IMPORTANT ----
+    let Some(contents) = &object.contents else {
         return Ok(None);
     };
 
-    let Some(bytes) = &bcs.value else {
+    // Extract BCS bytes
+    let Some(bytes) = &contents.value else {
         return Ok(None);
     };
 
-    let studio: Studio = bcs::from_bytes(&bytes)
+    // Decode into your Rust struct
+    let studio: Studio = bcs::from_bytes(bytes)
         .map_err(|e| EnclaveError::GenericError(format!("BCS decode Studio failed: {e}")))?;
 
     Ok(Some(studio))
