@@ -33,7 +33,7 @@ sui-sdk-types = { version = "0.1.0", features = ["serde"], optional = true }
 sui-crypto = { version = "0.1.0", features = ["ed25519"], optional = true }
 # Pinned to a stable commit for reproducible builds
 # Using package parameter to reference workspace member from git repository
-seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk", rev = "7b4e8c39e9b9a2ef350d64c4f48cfa046ed21e8e" }
+seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk", rev = "7b4e8c39e9b9a2ef350d64c4f48cfa046ed21e8e", optional = true }
 
 base64 = "0.22.1"
 aes-gcm = "0.10.3"
@@ -41,7 +41,4 @@ sui-rpc = "0.1.0"
 
 [features]
 default = []
-zing-watermark = ["sui-crypto", "sui-sdk-types"]
-weather-example = []
-twitter-example = ["regex"]
-seal-example = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
+zing-watermark = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
