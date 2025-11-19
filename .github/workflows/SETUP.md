@@ -241,12 +241,41 @@ terraform plan
 **原因**: 
 - 倉庫不存在
 - 倉庫名稱錯誤
-- 沒有訪問權限
+- 沒有訪問權限（最常見）
 
 **解決方案**:
+
+#### 方案 1: 確保倉庫存在且可訪問
 1. 確認 `ZingHall/zing-infra` 倉庫存在
-2. 確認 `github.repository_owner` 返回正確的值
-3. 檢查倉庫是否為私有（需要 token）
+2. 確認 `github.repository_owner` 返回正確的值（應該是 `ZingHall`）
+3. 檢查倉庫是否為私有
+
+#### 方案 2: 使用 Personal Access Token (PAT)
+如果 `zing-infra` 是私有倉庫，`GITHUB_TOKEN` 可能沒有跨倉庫訪問權限。需要：
+
+1. 創建一個 Personal Access Token (PAT)：
+   - 前往 GitHub Settings > Developer settings > Personal access tokens > Tokens (classic)
+   - 創建新 token，選擇 `repo` scope
+   - 複製 token
+
+2. 在 `nautilus-watermark-service` 倉庫中添加 Secret：
+   - 前往 Settings > Secrets and variables > Actions
+   - 添加新的 secret：`ZING_INFRA_TOKEN`，值為剛才創建的 PAT
+
+3. 更新 workflow 文件：
+   ```yaml
+   - name: Checkout infrastructure repository
+     uses: actions/checkout@v4
+     with:
+       repository: ${{ github.repository_owner }}/zing-infra
+       path: zing-infra
+       token: ${{ secrets.ZING_INFRA_TOKEN }}
+   ```
+
+#### 方案 3: 確保組織級別權限
+如果兩個倉庫都在同一個組織下：
+1. 確保 workflow 有 `contents: read` 權限（已在 workflow 中設置）
+2. 檢查組織設置，確保允許 workflow 訪問其他倉庫
 
 ### 問題 4: "Terraform backend initialization failed"
 
