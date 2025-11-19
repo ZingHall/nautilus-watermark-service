@@ -32,9 +32,8 @@ regex = { version = "1.5", optional = true }
 sui-sdk-types = { version = "0.1.0", features = ["serde"] }
 sui-crypto = { version = "0.1.0", features = ["ed25519"] }
 # Pinned to a stable commit for reproducible builds
-# Note: For git dependencies in subdirectories, Cargo requires both git and path
-# If this fails, the Cargo version may not support this syntax
-seal-sdk = { git = "https://github.com/MystenLabs/seal", rev = "7b4e8c39e9b9a2ef350d64c4f48cfa046ed21e8e", path = "crates/seal-sdk" }
+# Using package parameter to reference workspace member from git repository
+seal-sdk = { git = "https://github.com/MystenLabs/seal", package = "seal-sdk", rev = "7b4e8c39e9b9a2ef350d64c4f48cfa046ed21e8e" }
 
 # [features]
 # weather-example = []
