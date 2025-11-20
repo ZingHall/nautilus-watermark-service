@@ -36,7 +36,3 @@ seal-sdk = { git = "https://github.com/Jarekkkkk/seal", branch = "jarek" }
 base64 = "0.22.1"
 aes-gcm = "0.10.3"
 sui-rpc = "0.1.0"
-
-[features]
-default = []
-zing-watermark = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
