@@ -121,6 +121,7 @@ fn parse_key_server_v1_from_result(
 
 #[derive(Debug, Clone)]
 struct EncodedBytes(Vec<u8>);
+
 pub async fn fetch_seal_keys(
     sui_client: Arc<Mutex<Client>>,
     key_server_ids: &[Address],

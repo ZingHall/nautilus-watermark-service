@@ -85,16 +85,8 @@ pub async fn setup(
         }
     };
 
-    let enclave_object_input = Input::Shared {
-        object_id: request.enclave_object_id,
-        initial_shared_version,
-        mutable: false,
-    };
-
-    println!("enclave_object_input:{enclave_object_input:?}");
-
     let mut enclave_object_guard = (*ENCLAVE_OBJECT).write().await;
-    *enclave_object_guard = Some(enclave_object_input);
+    *enclave_object_guard = Some((request.enclave_object_id, initial_shared_version));
 
     Ok(Json(SetupResponse { succeed: true }))
 }
@@ -102,8 +94,6 @@ pub async fn setup(
 // load keys
 #[derive(Serialize, Deserialize)]
 pub struct LoadFileKeysRequest {
-    pub enclave_object_id: Address,
-    pub initial_shared_version: u64,
     // #[serde(deserialize_with = "deserialize_hex_vec")]
     // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
     #[serde(deserialize_with = "deserialize_wallet_addresses")]
@@ -162,9 +152,9 @@ pub async fn load_keys(
         println!("result:{result:?}");
         match parse_studio_from_result(result) {
             Ok(Some((studio, initial_shared_version))) => {
-                initial_shared_versions.push((wallet_addr, initial_shared_version));
                 if let Some(encrypted_file_key) = studio.encrypted_file_key {
                     successes.push(wallet_addr);
+                    initial_shared_versions.push((wallet_addr, initial_shared_version));
                     let encrypted_object: EncryptedObject = bcs::from_bytes(&encrypted_file_key)
                         .map_err(|e| {
                             EnclaveError::GenericError(format!("batch_get_objects_error: {e}"))
@@ -216,8 +206,6 @@ fn parse_studio_from_result(
 // init_parameter_load
 #[derive(Serialize, Deserialize)]
 pub struct InitParameterLoadRequest {
-    pub enclave_object_id: Address,
-    pub initial_shared_version: u64,
     // #[serde(deserialize_with = "deserialize_hex_vec")]
     // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
     #[serde(deserialize_with = "deserialize_wallet_addresses")]
@@ -235,6 +223,13 @@ pub async fn init_parameter_load(
     State(state): State<Arc<AppState>>,
     Json(request): Json<InitParameterLoadRequest>,
 ) -> Result<Json<InitParameterLoadResponse>, EnclaveError> {
+    let enclave_object_guard = ENCLAVE_OBJECT.read().await;
+    let enclave_object_opt = &*enclave_object_guard;
+
+    let enclave_object = enclave_object_opt
+        .as_ref() // if you want a reference; remove if you want ownership
+        .ok_or_else(|| EnclaveError::GenericError("Enclave object not setup".to_string()))?;
+
     // Generate the session and create certificate.
     let session = Ed25519KeyPair::generate(&mut thread_rng());
     let session_vk = session.public();
@@ -292,8 +287,8 @@ pub async fn init_parameter_load(
     // Create PTB for seal_approve of package with all key IDs.
     let ptb = create_ptb(
         SEAL_CONFIG.latest_package_id,
-        request.enclave_object_id,
-        request.initial_shared_version,
+        enclave_object.0,
+        enclave_object.1,
         studio_ids,
         request.studio_initial_shared_versions,
     )
@@ -451,7 +446,7 @@ async fn create_ptb(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AppState;
+    use crate::{zing_watermark::handlers::seal::fetch_seal_keys, AppState};
     use std::sync::Arc;
     use sui_rpc::client::Client;
     use sui_sdk_types::Address;
@@ -459,37 +454,85 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_keys_returns_file_key() {
-        // Prepare a wallet address
-        let wallet_address: Address =
-            "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
+        // 0. setup enclave_object when bootstrap the instance
+        let enclave_object_id: Address =
+            "0x9f97ef73b0cb7ffcc61e895fe2b2eca01ad392c8bbcb93aede36a19a2cf574f9"
                 .parse()
                 .unwrap();
 
         let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
         let sui_client = Arc::new(Mutex::new(Client::new(Client::TESTNET_FULLNODE).unwrap()));
-        let state = Arc::new(AppState { eph_kp, sui_client });
+        let state = Arc::new(AppState {
+            eph_kp,
+            sui_client: sui_client.clone(),
+        });
+
+        let request = SetupRequest { enclave_object_id };
+
+        let response = setup(State(state.clone()), Json(request)).await;
+        if let Ok(json) = response {
+            assert!(json.succeed)
+        };
+
+        // 1. fetch encrypted Filekeys and encoded in EncryptedObject
+        let wallet_address: Address =
+            "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
+                .parse()
+                .unwrap();
+        let key_server_ids: Vec<Address> = [
+            "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75",
+            "0xf5d14a81a982144ae441cd7d64b09027f116a468bd36e7eca494f750591623c8",
+        ]
+        .iter()
+        .map(|id| id.parse().unwrap())
+        .collect();
 
         let request = LoadFileKeysRequest {
-            enclave_object_id: "0x11dff7b6f3e8ff71c09d64b5157d521f2b6e3d3bdd445442a57f857749bdc5de"
-                .parse()
-                .unwrap(),
-            initial_shared_version: 645292726,
             wallet_addresses: vec![wallet_address],
             studio_initial_shared_versions: vec![645292722],
         };
 
-        let response = load_keys(State(state), Json(request)).await;
+        let response = load_keys(State(state.clone()), Json(request)).await;
+        if let Ok(json) = response {
+            let encrypted_objects = json.encrypted_objects.clone();
+            let (success_addresses, success_versions): (Vec<Address>, Vec<u64>) =
+                json.initial_shared_versions.clone().into_iter().unzip();
+            // 2. get encoded_request for fetching_keys
+            let res = init_parameter_load(
+                State(state.clone()),
+                Json(InitParameterLoadRequest {
+                    wallet_addresses: success_addresses.clone(),
+                    studio_initial_shared_versions: success_versions,
+                }),
+            )
+            .await;
+            if let Ok(json) = res {
+                // 3. 3: Fetch Keys from Seal Servers
+                let fetch_seal_keys_response =
+                    fetch_seal_keys(sui_client, &key_server_ids, json.encoded_request.clone())
+                        .await;
 
-        match response {
-            Ok(json) => {
-                println!("Successes: {:?}", json.0.successes);
-                println!("Failures: {:?}", json.0.failures);
-                println!("EncryptedObjects: {:?}", json.encrypted_objects);
+                if let Ok(json) = fetch_seal_keys_response {
+                    let results = complete_parameter_load(
+                        State(state),
+                        Json(CompleteParameterLoadRequest {
+                            wallet_addresses: success_addresses,
+                            encrypted_objects,
+                            seal_responses: json,
+                        }),
+                    )
+                    .await;
+
+                    if let Ok(json) = results {
+                        println!("succeed: {0}", json.loaded_keys_count);
+                    };
+                } else {
+                    panic!("fetching_keys fails");
+                }
+            } else {
+                panic!("init_parameter_load fails");
             }
-            Err(e) => {
-                println!("Error fetching keys: {e:?}");
-            }
-        }
+        };
     }
 
     #[tokio::test]
@@ -509,66 +552,14 @@ mod tests {
 
         assert!(response.is_ok());
 
-        let expected_enclaved_object = Input::Shared {
-            object_id: enclave_object_id,
-            initial_shared_version: 657054973,
-            mutable: false,
-        };
-        let enclave_object_static = ENCLAVE_OBJECT.read().await.clone();
+        let enclave_object_static = ENCLAVE_OBJECT.read().await;
 
         assert!(enclave_object_static.is_some());
-        assert!(enclave_object_static.unwrap() == expected_enclaved_object);
+        assert!(enclave_object_static.unwrap() == (enclave_object_id, 657054973));
 
         match response {
             Ok(json) => {
                 println!("Successes: {:?}", json.succeed);
-            }
-            Err(e) => {
-                println!("Error fetching keys: {e:?}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_df() {
-        let seal_server: Address =
-            "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75"
-                .parse()
-                .unwrap();
-
-        let df_id =
-            seal_server.derive_dynamic_child_id(&TypeTag::U64, &bcs::to_bytes(&1_u64).unwrap());
-
-        println!("df_id:{df_id}");
-    }
-
-    #[tokio::test]
-    async fn test_init_parameter_load() {
-        let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
-        let sui_client = Arc::new(Mutex::new(Client::new(Client::TESTNET_FULLNODE).unwrap()));
-        let state = Arc::new(AppState { eph_kp, sui_client });
-
-        let wallet_address: Address =
-            "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
-                .parse()
-                .unwrap();
-        let enclave_object_id: Address =
-            "0x9f97ef73b0cb7ffcc61e895fe2b2eca01ad392c8bbcb93aede36a19a2cf574f9"
-                .parse()
-                .unwrap();
-
-        let request = InitParameterLoadRequest {
-            enclave_object_id,
-            initial_shared_version: 657054973,
-            wallet_addresses: vec![wallet_address],
-            studio_initial_shared_versions: vec![645292722],
-        };
-
-        let response = init_parameter_load(State(state), Json(request)).await;
-
-        match response {
-            Ok(json) => {
-                println!("Successes: {:?}", json.encoded_request);
             }
             Err(e) => {
                 println!("Error fetching keys: {e:?}");

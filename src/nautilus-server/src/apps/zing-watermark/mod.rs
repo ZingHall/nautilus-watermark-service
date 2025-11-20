@@ -19,7 +19,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use sui_sdk_types::Address;
-use sui_sdk_types::Input;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -37,7 +36,8 @@ lazy_static::lazy_static! {
         serde_yaml::from_str(config_str)
             .expect("Failed to parse seal_config.yaml")
     };
-    pub static ref ENCLAVE_OBJECT: Arc<RwLock<Option<Input>>> = {
+    // (enclave_object_id, initial_version)
+    pub static ref ENCLAVE_OBJECT: Arc<RwLock<Option<(Address, u64)>>> = {
         Arc::new(RwLock::new(Option::None))
     };
     /// Encryption secret key generated initialized on startup.
