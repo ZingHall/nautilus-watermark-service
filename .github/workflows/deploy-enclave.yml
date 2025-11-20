@@ -191,6 +191,7 @@ jobs:
           echo "✅ EIF uploaded successfully"
 
       - name: Update Terraform EIF version
+        id: update-eif-version
         working-directory: zing-infra/environments/${{ steps.env.outputs.environment }}/nautilus-enclave
         run: |
           echo "📝 Updating Terraform configuration..."
@@ -206,9 +207,14 @@ jobs:
           pattern = r'(variable\s+"eif_version"\s*\{[^}]*default\s*=\s*)"[^"]*"'
           replacement = r'\1"${{ steps.shorten-commit.outputs.sha_short }}"'
           
+          UPDATED_FILE = None
+          
           if re.search(pattern, content):
               # Update existing eif_version default value
               content = re.sub(pattern, replacement, content)
+              with open('variables.tf', 'w') as f:
+                  f.write(content)
+              UPDATED_FILE = 'variables.tf'
           else:
               # Fallback: try to find and update in main.tf (for backwards compatibility)
               with open('main.tf', 'r') as f:
@@ -221,16 +227,93 @@ jobs:
                   main_content = re.sub(main_pattern, main_replacement, main_content)
                   with open('main.tf', 'w') as f:
                       f.write(main_content)
-                  print("Updated eif_version in main.tf (fallback)")
-                  exit(0)
+                  UPDATED_FILE = 'main.tf'
           
-          with open('variables.tf', 'w') as f:
-              f.write(content)
+          if UPDATED_FILE:
+              print(f"Updated eif_version in {UPDATED_FILE}")
+          else:
+              print("ERROR: Could not find eif_version to update")
+              exit(1)
           PYTHON_SCRIPT
           
           echo "✅ Updated eif_version default to ${{ steps.shorten-commit.outputs.sha_short }}"
           echo "Changes:"
           git diff variables.tf || git diff main.tf || true
+          
+          # Determine which file was updated and set as output for next step
+          if git diff --name-only | grep -q variables.tf; then
+            echo "updated_file=variables.tf" >> $GITHUB_OUTPUT
+          elif git diff --name-only | grep -q main.tf; then
+            echo "updated_file=main.tf" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: No changes detected in variables.tf or main.tf"
+            exit 1
+          fi
+
+      - name: Commit Terraform changes
+        id: commit-changes
+        working-directory: zing-infra
+        env:
+          GITHUB_TOKEN: ${{ secrets.ZING_INFRA_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Determine if we should create a PR or push directly to main
+          CREATE_PR=false
+          if [ "${{ github.event_name }}" == "push" ] && [ "${{ github.ref }}" == "refs/heads/main" ] && [ "${{ steps.env.outputs.environment }}" == "production" ]; then
+            CREATE_PR=true
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ github.event.inputs.auto_apply }}" != "true" ]; then
+            CREATE_PR=true
+          fi
+          
+          # Create branch if we need a PR, otherwise work on main
+          if [ "$CREATE_PR" == "true" ]; then
+            BRANCH_NAME="update-enclave-eif-${{ steps.shorten-commit.outputs.sha_short }}"
+            git checkout -b "$BRANCH_NAME"
+            echo "Created branch: $BRANCH_NAME"
+          else
+            git checkout main || git checkout -b main
+            echo "Working on main branch"
+          fi
+          
+          # Get the updated file from previous step
+          UPDATED_FILE="${{ steps.update-eif-version.outputs.updated_file }}"
+          if [ -z "$UPDATED_FILE" ]; then
+            echo "ERROR: Could not determine which file was updated"
+            exit 1
+          fi
+          
+          echo "Updating file: $UPDATED_FILE"
+          
+          git add "environments/${{ steps.env.outputs.environment }}/nautilus-enclave/$UPDATED_FILE"
+          
+          # Check if there are any changes to commit
+          if git diff --staged --quiet; then
+            echo "⚠️ No changes to commit (file may already be up to date)"
+            echo "skip_commit=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "skip_commit=false" >> $GITHUB_OUTPUT
+          
+          COMMIT_MSG="chore: update enclave EIF version to ${{ steps.shorten-commit.outputs.sha_short }}
+
+          - EIF file: s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif
+          - Source commit: ${{ github.sha }}
+          - Environment: ${{ steps.env.outputs.environment }}"
+          
+          git commit -m "$COMMIT_MSG"
+          echo "✅ Committed changes to $UPDATED_FILE"
+          
+          # Push the branch
+          if [ "$CREATE_PR" == "true" ]; then
+            git push origin "$BRANCH_NAME"
+            echo "Pushed branch: $BRANCH_NAME"
+          else
+            git push origin main
+            echo "Pushed to main branch"
+          fi
 
       - name: Create Pull Request for Terraform changes
         if: |
@@ -238,22 +321,15 @@ jobs:
           (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply != 'true')
         working-directory: zing-infra
         env:
-          # Use ZING_INFRA_TOKEN for private repos, or GITHUB_TOKEN if zing-infra is public
-          # Note: If zing-infra is private, ZING_INFRA_TOKEN must be set in repository secrets
           GITHUB_TOKEN: ${{ secrets.ZING_INFRA_TOKEN }}
         run: |
+          # Skip if commit was skipped
+          if [ "${{ steps.commit-changes.outputs.skip_commit }}" == "true" ]; then
+            echo "⚠️ Skipping PR creation (no changes to commit)"
+            exit 0
+          fi
+          
           BRANCH_NAME="update-enclave-eif-${{ steps.shorten-commit.outputs.sha_short }}"
-          
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git checkout -b "$BRANCH_NAME"
-          git add environments/${{ steps.env.outputs.environment }}/nautilus-enclave/main.tf
-          git commit -m "chore: update enclave EIF version to ${{ steps.shorten-commit.outputs.sha_short }}
-
-          - EIF file: s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif
-          - Source commit: ${{ github.sha }}
-          - Environment: ${{ steps.env.outputs.environment }}"
           
           # Check if PR already exists
           PR_EXISTS=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null || echo "")
@@ -273,9 +349,9 @@ jobs:
           2. Merge this PR to apply the update
           3. Or run \`terraform apply\` manually in the environment directory" \
               --base main
+            echo "✅ Created PR for EIF version update"
           else
             echo "PR already exists: #$PR_EXISTS"
-            git push origin "$BRANCH_NAME" --force
           fi
 
       - name: Apply Terraform changes
