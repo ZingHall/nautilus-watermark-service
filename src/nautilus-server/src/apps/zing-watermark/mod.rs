@@ -12,6 +12,7 @@ use axum::{
     Router,
 };
 pub use handlers::private::{complete_parameter_load, init_parameter_load};
+use fastcrypto::groups::bls12381::G1Element;
 use rand::thread_rng;
 use seal_sdk::{genkey, ElGamalSecretKey};
 use serde::{Deserialize, Serialize};
@@ -46,6 +47,12 @@ lazy_static::lazy_static! {
     };
 
    /// Maps: wallet address -> raw 32-byte FileKey (AES-256 key)
+    /// Cached Seal keys for decrypting encrypted objects.
+    /// Reference: https://github.com/MystenLabs/nautilus/blob/seal-updates/src/nautilus-server/src/apps/seal-example/endpoints.rs
+    pub static ref CACHED_KEYS: Arc<RwLock<HashMap<Vec<u8>, HashMap<Address, G1Element>>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
+   /// Maps: wallet address ? raw 32-byte FileKey (AES-256 key)
     pub static ref FILE_KEYS: Arc<RwLock<HashMap<Address, Vec<u8>>>> =
         Arc::new(RwLock::new(HashMap::new()));
 }

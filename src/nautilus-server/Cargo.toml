@@ -1,6 +1,6 @@
 [package]
 name = "nautilus-server"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 authors = ["Mysten Labs <build@mystenlabs.com>"]
 license = "Apache-2.0"
@@ -33,10 +33,10 @@ sui-sdk-types = { version = "0.1.0", features = ["serde"] }
 sui-crypto = { version = "0.1.0", features = ["ed25519"] }
 seal-sdk = { git = "https://github.com/Jarekkkkk/seal", branch = "jarek" }
 
-# [features]
-# weather-example = []
-# twitter-example = ["regex"]
-# seal-example = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
 base64 = "0.22.1"
 aes-gcm = "0.10.3"
 sui-rpc = "0.1.0"
+
+[features]
+default = []
+zing-watermark = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
