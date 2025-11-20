@@ -22,7 +22,9 @@ use sui_sdk_types::{
 
 use crate::zing_watermark::models::Studio;
 use crate::zing_watermark::{types::*, ENCLAVE_OBJECT, ENCRYPTION_KEYS, FILE_KEYS, SEAL_CONFIG};
-use crate::{AppState, EnclaveError};
+use crate::{
+    deserialize_move_struct, extract_bcs_bytes, extract_shared_version, AppState, EnclaveError,
+};
 
 // setup
 #[derive(Serialize, Deserialize)]
@@ -114,6 +116,7 @@ pub struct LoadFileKeysResponse {
     pub successes: Vec<Address>,
     pub failures: Vec<Address>,
     pub initial_shared_versions: Vec<(Address, u64)>, // wallet_address -> initial_shared_version
+    pub encrypted_objects: Vec<EncryptedObject>,
 }
 
 pub async fn load_keys(
@@ -133,6 +136,7 @@ pub async fn load_keys(
         })
         .collect();
 
+    println!("requests:{requests:?}");
     // Fetch all studios (some may be missing)
     let response = client
         .ledger_client()
@@ -148,17 +152,24 @@ pub async fn load_keys(
     let mut successes = Vec::new();
     let mut failures = Vec::new();
     let mut initial_shared_versions = Vec::new();
+    let mut encrypted_objects = Vec::new();
 
     for (wallet_addr, result) in request
         .wallet_addresses
         .into_iter()
         .zip(response.objects.into_iter())
     {
+        println!("result:{result:?}");
         match parse_studio_from_result(result) {
             Ok(Some((studio, initial_shared_version))) => {
                 initial_shared_versions.push((wallet_addr, initial_shared_version));
-                if studio.encrypted_file_key.is_some() {
+                if let Some(encrypted_file_key) = studio.encrypted_file_key {
                     successes.push(wallet_addr);
+                    let encrypted_object: EncryptedObject = bcs::from_bytes(&encrypted_file_key)
+                        .map_err(|e| {
+                            EnclaveError::GenericError(format!("batch_get_objects_error: {e}"))
+                        })?;
+                    encrypted_objects.push(encrypted_object);
                 } else {
                     failures.push(wallet_addr);
                 };
@@ -178,60 +189,28 @@ pub async fn load_keys(
         successes,
         failures,
         initial_shared_versions,
+        encrypted_objects,
     }))
 }
 
 fn parse_studio_from_result(
     result: GetObjectResult,
 ) -> Result<Option<(Studio, u64)>, EnclaveError> {
-    // Handle RPC error from the server
-    if let Some(status) = result.error_opt() {
-        if status.code != 0 {
-            return Err(EnclaveError::GenericError(format!(
-                "RPC error {}: {}",
-                status.code, status.message
-            )));
-        }
-    }
-
-    // Extract the Object
-    let Some(object) = result.object_opt() else {
+    // Extract BCS bytes (handles RPC errors too)
+    let bytes_opt = extract_bcs_bytes(&result)?;
+    let Some(bytes) = bytes_opt else {
         return Ok(None);
     };
 
-    // Extract initial_shared_version from owner
-    let initial_shared_version = match &object.owner {
-        Some(owner) => {
-            if owner.kind.is_some() {
-                owner.version.unwrap_or(0)
-            } else {
-                return Err(EnclaveError::GenericError(
-                    "Object is not shared".to_string(),
-                ));
-            }
-        }
-        None => {
-            return Err(EnclaveError::GenericError(
-                "Object has no owner information".to_string(),
-            ));
-        }
-    };
+    println!("studio_bytes:{bytes:?}");
 
-    // ---- IMPORTANT ----
-    let Some(contents) = &object.contents else {
-        return Ok(None);
-    };
+    // Deserialize Move struct
+    let studio: Studio = deserialize_move_struct(&bytes, "Studio")?;
 
-    // Extract BCS bytes
-    let Some(bytes) = &contents.value else {
-        return Ok(None);
-    };
+    // Extract initial shared version
+    let version = extract_shared_version(&result)?;
 
-    // Decode into your Rust struct
-    let studio: Studio = bcs::from_bytes(bytes)
-        .map_err(|e| EnclaveError::GenericError(format!("BCS decode Studio failed: {e}")))?;
-
-    Ok(Some((studio, initial_shared_version)))
+    Ok(Some((studio, version)))
 }
 
 // init_parameter_load
@@ -505,6 +484,7 @@ mod tests {
             Ok(json) => {
                 println!("Successes: {:?}", json.0.successes);
                 println!("Failures: {:?}", json.0.failures);
+                println!("EncryptedObjects: {:?}", json.encrypted_objects);
             }
             Err(e) => {
                 println!("Error fetching keys: {e:?}");

@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
@@ -9,9 +8,8 @@ use fastcrypto::error::FastCryptoResult;
 use serde_json::json;
 use std::fmt;
 use std::sync::Arc;
-use sui_rpc::field::FieldMask;
+use sui_rpc::proto::sui::rpc::v2::GetObjectResult;
 use sui_rpc::Client;
-use sui_sdk_types::Address;
 use sui_sdk_types::Object;
 use tokio::sync::Mutex;
 
@@ -69,34 +67,57 @@ impl Encoding for PrefixedHex {
     }
 }
 
-async fn fetch_and_deserialize_move_object<T: serde::de::DeserializeOwned>(
-    grpc_client: &mut Client,
-    object_id: &Address,
-    error_context: &str,
-) -> anyhow::Result<T> {
-    let mut ledger_client = grpc_client.ledger_client();
-    let mut request = sui_rpc::proto::sui::rpc::v2::GetObjectRequest::default();
-    request.object_id = Some(object_id.to_string());
-    request.read_mask = Some(FieldMask {
-        paths: vec!["bcs".to_string()],
-    });
+fn extract_bcs_bytes(result: &GetObjectResult) -> Result<Option<Vec<u8>>, EnclaveError> {
+    if let Some(status) = result.error_opt() {
+        if status.code != 0 {
+            return Err(EnclaveError::GenericError(format!(
+                "RPC error {}: {}",
+                status.code, status.message
+            )));
+        }
+    }
 
-    let response = ledger_client
-        .get_object(request)
-        .await
-        .map(|r| r.into_inner())?;
+    let Some(object) = result.object_opt() else {
+        return Ok(None);
+    };
 
-    let bcs_bytes = response
-        .object
-        .and_then(|obj| obj.bcs)
-        .and_then(|bcs| bcs.value)
-        .map(|bytes| bytes.to_vec())
-        .ok_or_else(|| anyhow!("No BCS data in {error_context}"))?;
+    let bytes = object
+        .bcs
+        .as_ref()
+        .and_then(|bcs| bcs.value.as_ref())
+        .map(|bytes| bytes.to_vec());
 
-    let obj: Object = bcs::from_bytes(&bcs_bytes)?;
-    let move_object = obj
+    Ok(bytes)
+}
+
+fn deserialize_move_struct<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    ctx: &str,
+) -> Result<T, EnclaveError> {
+    let object: Object = bcs::from_bytes(bytes)
+        .map_err(|e| EnclaveError::GenericError(format!("BCS decode {ctx} failed: {e}")))?;
+
+    let move_obj = object
         .as_struct()
-        .ok_or_else(|| anyhow!("Object is not a Move struct in {error_context}"))?;
-    bcs::from_bytes(move_object.contents())
-        .map_err(|e| anyhow!("Failed to deserialize {error_context}: {e}"))
+        .ok_or_else(|| EnclaveError::GenericError(format!("{ctx} is not a Move struct object")))?;
+
+    bcs::from_bytes(move_obj.contents())
+        .map_err(|e| EnclaveError::GenericError(format!("BCS decode {ctx} failed: {e}")))
+}
+
+fn extract_shared_version(result: &GetObjectResult) -> Result<u64, EnclaveError> {
+    let object = result
+        .object_opt()
+        .ok_or_else(|| EnclaveError::GenericError("Object missing".into()))?;
+
+    let owner = object
+        .owner
+        .as_ref()
+        .ok_or_else(|| EnclaveError::GenericError("Object has no owner".into()))?;
+
+    if owner.kind.is_none() {
+        return Err(EnclaveError::GenericError("Object is not shared".into()));
+    }
+
+    Ok(owner.version.unwrap_or(0))
 }

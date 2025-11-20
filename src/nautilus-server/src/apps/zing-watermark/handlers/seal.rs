@@ -7,11 +7,18 @@ use fastcrypto::{
 use reqwest::Body;
 use seal_sdk::{FetchKeyRequest, FetchKeyResponse};
 use serde::{Deserialize, Serialize};
-use sui_rpc::Client;
+use sui_rpc::{
+    field::{FieldMask, FieldMaskUtil},
+    proto::sui::rpc::v2::{BatchGetObjectsRequest, GetObjectRequest, GetObjectResult},
+    Client,
+};
 use sui_sdk_types::{Address, TypeTag};
 use tokio::sync::Mutex;
 
-use crate::{fetch_and_deserialize_move_object, zing_watermark::models::Field, PrefixedHex};
+use crate::{
+    deserialize_move_struct, extract_bcs_bytes, extract_shared_version,
+    zing_watermark::models::Field, PrefixedHex,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct KeyServerInfo {
@@ -35,36 +42,81 @@ pub async fn fetch_key_server_urls(
 ) -> Result<Vec<KeyServerInfo>, FastCryptoError> {
     let mut client = sui_client.lock().await;
 
-    let mut key_servers = Vec::new();
-    for key_server_id in key_server_ids {
-        // Get the dynamic field object for version 1
-        let key_server_v1_df_id =
-            key_server_id.derive_dynamic_child_id(&TypeTag::U64, &bcs::to_bytes(&1_u64).unwrap());
+    let requests: Vec<GetObjectRequest> = key_server_ids
+        .iter()
+        .map(|id| {
+            let df_id = id.derive_dynamic_child_id(&TypeTag::U64, &bcs::to_bytes(&1u64).unwrap());
+            GetObjectRequest::new(&df_id)
+        })
+        .collect();
 
-        let key_server_v1_field: Field<u64, KeyServerV1> = fetch_and_deserialize_move_object(
-            &mut client,
-            &key_server_v1_df_id,
-            &format!("KeyServerV1 dynamic field for {key_server_v1_df_id}"),
+    //
+    // Perform a **single batch RPC call**
+    //
+    let response = client
+        .ledger_client()
+        .batch_get_objects(
+            BatchGetObjectsRequest::const_default()
+                .with_requests(requests)
+                .with_read_mask(FieldMask::from_paths(vec!["bcs", "owner"])),
         )
         .await
-        .map_err(|e| {
-            FastCryptoError::GeneralError(format!(
-                "Failed to fetch and deserialize KeyServerV1 for {key_server_v1_df_id}: {e}"
-            ))
-        })?;
+        .map_err(|e| FastCryptoError::GeneralError(format!("batch_get_objects error: {e}")))?
+        .into_inner();
 
-        let key_server_v1 = key_server_v1_field.value;
-        let public_key = Hex::encode(key_server_v1.pk);
+    //
+    // Parse results
+    //
+    let mut output = Vec::new();
 
-        key_servers.push(KeyServerInfo {
-            object_id: key_server_v1_df_id,
-            name: key_server_v1.name,
-            url: key_server_v1.url,
-            public_key,
-        });
+    for (key_server_id, result) in key_server_ids.iter().zip(response.objects.into_iter()) {
+        match parse_key_server_v1_from_result(result) {
+            Ok(Some((field, _shared_ver))) => {
+                let value = field.value;
+                output.push(KeyServerInfo {
+                    object_id: field.id,
+                    name: value.name,
+                    url: value.url,
+                    public_key: Hex::encode(value.pk),
+                });
+            }
+            Ok(None) => {
+                return Err(FastCryptoError::GeneralError(format!(
+                    "Failed to parse key server for server_id: {key_server_id}",
+                )));
+            }
+            Err(e) => {
+                return Err(FastCryptoError::GeneralError(format!(
+                    "Failed to parse key server for server_id: {key_server_id}: {e}",
+                )));
+            }
+        }
     }
 
-    Ok(key_servers)
+    Ok(output)
+}
+
+fn parse_key_server_v1_from_result(
+    result: GetObjectResult,
+) -> Result<Option<(Field<u64, KeyServerV1>, u64)>, FastCryptoError> {
+    // Extract initial shared version (owner.version)
+    let initial_shared_version = extract_shared_version(&result)
+        .map_err(|e| FastCryptoError::GeneralError(e.to_string()))?;
+
+    // Extract BCS bytes
+    let bytes_opt =
+        extract_bcs_bytes(&result).map_err(|e| FastCryptoError::GeneralError(e.to_string()))?;
+
+    let Some(bytes) = bytes_opt else {
+        return Ok(None);
+    };
+
+    // Deserialize Dynamic Field wrapper itself
+    let field: Field<u64, KeyServerV1> =
+        deserialize_move_struct(&bytes, "KeyServerV1 dynamic field")
+            .map_err(|e| FastCryptoError::GeneralError(e.to_string()))?;
+
+    Ok(Some((field, initial_shared_version)))
 }
 
 #[derive(Debug, Clone)]
