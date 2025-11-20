@@ -69,9 +69,9 @@ pub async fn spawn_host_init_server(state: Arc<AppState>) -> Result<(), EnclaveE
     let host_app = Router::new()
         .route("/ping", get(ping))
         .route("/setup_enclave_object", post(setup_enclave_object))
+        .route("/seal/fetch_file_keys", post(fetch_file_keys))
         .route("/seal/encoded_requests", post(get_seal_encoded_requests))
         .route("/seal/decrypt_file_keys", post(decrypt_file_keys))
-        .route("/seal/fetch_file_keys", post(fetch_file_keys))
         .with_state(state);
 
     let host_listener = TcpListener::bind("0.0.0.0:3001")

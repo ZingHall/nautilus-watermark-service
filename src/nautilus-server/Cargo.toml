@@ -36,3 +36,7 @@ seal-sdk = { git = "https://github.com/Jarekkkkk/seal", branch = "jarek" }
 base64 = "0.22.1"
 aes-gcm = "0.10.3"
 sui-rpc = "0.1.0"
+
+[dev-dependencies]
+http = "1.3.1"
+tower = "0.5.2"

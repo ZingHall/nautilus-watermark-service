@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -13,6 +16,53 @@ use crate::{
     zing_watermark::{get_file_key_for_wallet, FILE_KEYS, ZING_FILE_KEY_IV_12_BYTES},
     AppState, EnclaveError,
 };
+
+/// Query params: /file_keys?page=1&limit=20
+#[derive(Debug, Deserialize)]
+pub struct Pagination {
+    pub page: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileKeysListResponse {
+    pub total_wallets: usize,
+    pub page: usize,
+    pub limit: usize,
+    pub wallets: Vec<String>,
+}
+
+/// Returns **only wallet addresses**, never the secret AES key
+pub async fn list_file_keys(Query(pagination): Query<Pagination>) -> Json<FileKeysListResponse> {
+    let page = pagination.page.unwrap_or(1).max(1);
+    let limit = pagination.limit.unwrap_or(20).max(1);
+
+    let file_keys_guard = FILE_KEYS.read().await;
+
+    let total_wallets = file_keys_guard.len();
+
+    // Extract only wallet addresses
+    let all_wallets: Vec<String> = file_keys_guard
+        .keys()
+        .map(|addr| addr.to_string())
+        .collect();
+
+    let start = (page - 1) * limit;
+    let end = (start + limit).min(all_wallets.len());
+
+    let wallets = if start < all_wallets.len() {
+        all_wallets[start..end].to_vec()
+    } else {
+        vec![]
+    };
+
+    Json(FileKeysListResponse {
+        total_wallets,
+        page,
+        limit,
+        wallets,
+    })
+}
 
 /// Inner type T for IntentMessage<T>
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,7 +82,7 @@ pub struct RequestIntentStruct {
     pub nonce: String,
 }
 
-pub async fn process_data(
+pub async fn decrypt_files(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ProcessDataRequest<RequestIntentStruct>>,
 ) -> Result<Json<ProcessedDataResponse<IntentMessage<DecryptedContentResponse>>>, EnclaveError> {
