@@ -106,7 +106,8 @@ jobs:
           echo "before building EIF files or making any changes."
           
           # Initialize Terraform with backend config (without profile for OIDC)
-          terraform init \
+          # Use -reconfigure to handle backend config changes without migration
+          terraform init -reconfigure \
             -backend-config="bucket=$TF_BACKEND_BUCKET" \
             -backend-config="key=$TF_BACKEND_KEY" \
             -backend-config="region=$TF_BACKEND_REGION" \
@@ -291,7 +292,8 @@ jobs:
           echo "🚀 Applying Terraform changes..."
           
           # Initialize Terraform with backend config (without profile for OIDC)
-          terraform init \
+          # Use -reconfigure to handle backend config changes without migration
+          terraform init -reconfigure \
             -backend-config="bucket=$TF_BACKEND_BUCKET" \
             -backend-config="key=$TF_BACKEND_KEY" \
             -backend-config="region=$TF_BACKEND_REGION" \
