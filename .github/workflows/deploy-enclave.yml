@@ -80,6 +80,83 @@ jobs:
           role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-cicd-role
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Checkout infrastructure repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/zing-infra
+          path: zing-infra
+          token: ${{ secrets.ZING_INFRA_TOKEN }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+          terraform_wrapper: false
+
+      - name: Verify Terraform permissions (plan only)
+        working-directory: zing-infra/environments/${{ steps.env.outputs.environment }}/nautilus-enclave
+        env:
+          TF_BACKEND_BUCKET: terraform-zing-${{ steps.env.outputs.environment }}
+          TF_BACKEND_KEY: nautilus-enclave.tfstate
+          TF_BACKEND_REGION: ${{ env.AWS_REGION }}
+          TF_BACKEND_DYNAMODB_TABLE: terraform-lock-table
+        run: |
+          echo "🔍 Verifying Terraform permissions with terraform plan..."
+          echo "This step validates that the IAM role has all required permissions"
+          echo "before building EIF files or making any changes."
+          
+          # Initialize Terraform with backend config (without profile for OIDC)
+          terraform init \
+            -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            -backend-config="key=$TF_BACKEND_KEY" \
+            -backend-config="region=$TF_BACKEND_REGION" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=$TF_BACKEND_DYNAMODB_TABLE"
+          
+          # Run terraform plan to verify permissions
+          # This will fail if any required permissions are missing
+          # Use current eif_version from variables.tf for this check
+          set +e  # Don't exit on error, we'll handle it manually
+          terraform plan -detailed-exitcode
+          PLAN_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
+          
+          if [ "$PLAN_EXIT_CODE" = "1" ]; then
+            echo "❌ terraform plan failed - check IAM permissions"
+            echo ""
+            echo "Common missing permissions:"
+            echo "  S3:"
+            echo "    - s3:GetBucketPolicy, s3:PutBucketPolicy, s3:GetBucketTagging"
+            echo "  Route53:"
+            echo "    - route53:ListHostedZones, route53:GetHostedZone"
+            echo "    - route53:ListTagsForResource, route53:ChangeTagsForResource"
+            echo "  ACM:"
+            echo "    - acm:DescribeCertificate, acm:ListCertificates"
+            echo "    - acm:ListTagsForCertificate, acm:AddTagsToCertificate"
+            echo "  ELB:"
+            echo "    - elasticloadbalancing:DescribeLoadBalancers, elasticloadbalancing:DescribeTargetGroups"
+            echo "  CloudWatch Logs:"
+            echo "    - logs:DescribeLogGroups, logs:CreateLogGroup"
+            echo "    - logs:ListTagsForResource, logs:TagResource, logs:UntagResource"
+            echo "  IAM:"
+            echo "    - iam:GetRole, iam:CreateRole, iam:UpdateRole, iam:DeleteRole"
+            echo "    - iam:PutRolePolicy, iam:DeleteRolePolicy, iam:GetRolePolicy"
+            echo "    - iam:CreateInstanceProfile, iam:AddRoleToInstanceProfile"
+            echo ""
+            echo "Please update the github-cicd module's terraform_policy to include these permissions."
+            exit 1
+          elif [ "$PLAN_EXIT_CODE" = "2" ]; then
+            echo "✅ terraform plan succeeded - changes detected (this is expected)"
+            echo "All required permissions are available"
+          elif [ "$PLAN_EXIT_CODE" = "0" ]; then
+            echo "✅ terraform plan succeeded - no changes needed"
+            echo "All required permissions are available"
+          else
+            echo "⚠️ terraform plan returned unexpected exit code: $PLAN_EXIT_CODE"
+            echo "This might indicate permission issues. Please check the output above."
+            exit 1
+          fi
+
       - name: Check if EIF already exists in S3
         id: check-eif
         run: |
@@ -118,23 +195,6 @@ jobs:
           
           echo "eif_path=$EIF_S3_PATH" >> $GITHUB_OUTPUT
           echo "✅ EIF uploaded successfully"
-
-      - name: Checkout infrastructure repository
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/zing-infra
-          path: zing-infra
-          # Note: If zing-infra is a private repository, you may need to:
-          # 1. Use a Personal Access Token (PAT) with repo scope instead of GITHUB_TOKEN
-          # 2. Ensure the workflow has permissions to access the repository
-          # 3. Or ensure both repositories are in the same organization with proper access
-          token: ${{ secrets.ZING_INFRA_TOKEN }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.6.0
-          terraform_wrapper: false
 
       - name: Update Terraform EIF version
         working-directory: zing-infra/environments/${{ steps.env.outputs.environment }}/nautilus-enclave
