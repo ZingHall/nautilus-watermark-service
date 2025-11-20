@@ -97,6 +97,143 @@ pub async fn setup(
     Ok(Json(SetupResponse { succeed: true }))
 }
 
+// load keys
+#[derive(Serialize, Deserialize)]
+pub struct LoadFileKeysRequest {
+    pub enclave_object_id: Address,
+    pub initial_shared_version: u64,
+    // #[serde(deserialize_with = "deserialize_hex_vec")]
+    // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
+    #[serde(deserialize_with = "deserialize_wallet_addresses")]
+    pub wallet_addresses: Vec<Address>,
+    pub studio_initial_shared_versions: Vec<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LoadFileKeysResponse {
+    pub successes: Vec<Address>,
+    pub failures: Vec<Address>,
+    pub initial_shared_versions: Vec<(Address, u64)>, // wallet_address -> initial_shared_version
+}
+
+pub async fn load_keys(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<LoadFileKeysRequest>,
+) -> Result<Json<LoadFileKeysResponse>, EnclaveError> {
+    let mut client = state.sui_client.lock().await;
+
+    let requests: Vec<GetObjectRequest> = request
+        .wallet_addresses
+        .iter()
+        .map(|addr| {
+            let studio_id = SEAL_CONFIG
+                .studio_config_shared_object_id
+                .derive_object_id(&TypeTag::Address, addr.as_bytes());
+            GetObjectRequest::new(&studio_id)
+        })
+        .collect();
+
+    // Fetch all studios (some may be missing)
+    let response = client
+        .ledger_client()
+        .batch_get_objects(
+            BatchGetObjectsRequest::const_default()
+                .with_requests(requests)
+                .with_read_mask(FieldMask::from_paths(vec!["bcs", "owner"])),
+        )
+        .await
+        .map_err(|e| EnclaveError::GenericError(format!("batch_get_objects_error: {e}")))?
+        .into_inner();
+
+    let mut successes = Vec::new();
+    let mut failures = Vec::new();
+    let mut initial_shared_versions = Vec::new();
+
+    for (wallet_addr, result) in request
+        .wallet_addresses
+        .into_iter()
+        .zip(response.objects.into_iter())
+    {
+        match parse_studio_from_result(result) {
+            Ok(Some((studio, initial_shared_version))) => {
+                initial_shared_versions.push((wallet_addr, initial_shared_version));
+                if studio.encrypted_file_key.is_some() {
+                    successes.push(wallet_addr);
+                } else {
+                    failures.push(wallet_addr);
+                };
+            }
+            Ok(None) => {
+                // Studio exists but encrypted_file_key = None
+                failures.push(wallet_addr);
+            }
+            Err(_err) => {
+                // Studio missing, or parsing failed
+                failures.push(wallet_addr);
+            }
+        }
+    }
+
+    Ok(Json(LoadFileKeysResponse {
+        successes,
+        failures,
+        initial_shared_versions,
+    }))
+}
+
+fn parse_studio_from_result(
+    result: GetObjectResult,
+) -> Result<Option<(Studio, u64)>, EnclaveError> {
+    // Handle RPC error from the server
+    if let Some(status) = result.error_opt() {
+        if status.code != 0 {
+            return Err(EnclaveError::GenericError(format!(
+                "RPC error {}: {}",
+                status.code, status.message
+            )));
+        }
+    }
+
+    // Extract the Object
+    let Some(object) = result.object_opt() else {
+        return Ok(None);
+    };
+
+    // Extract initial_shared_version from owner
+    let initial_shared_version = match &object.owner {
+        Some(owner) => {
+            if owner.kind.is_some() {
+                owner.version.unwrap_or(0)
+            } else {
+                return Err(EnclaveError::GenericError(
+                    "Object is not shared".to_string(),
+                ));
+            }
+        }
+        None => {
+            return Err(EnclaveError::GenericError(
+                "Object has no owner information".to_string(),
+            ));
+        }
+    };
+
+    // ---- IMPORTANT ----
+    let Some(contents) = &object.contents else {
+        return Ok(None);
+    };
+
+    // Extract BCS bytes
+    let Some(bytes) = &contents.value else {
+        return Ok(None);
+    };
+
+    // Decode into your Rust struct
+    let studio: Studio = bcs::from_bytes(bytes)
+        .map_err(|e| EnclaveError::GenericError(format!("BCS decode Studio failed: {e}")))?;
+
+    Ok(Some((studio, initial_shared_version)))
+}
+
 // init_parameter_load
 #[derive(Serialize, Deserialize)]
 pub struct InitParameterLoadRequest {
@@ -267,142 +404,6 @@ pub async fn complete_parameter_load(
     }))
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct LoadFileKeysRequest {
-    pub enclave_object_id: Address,
-    pub initial_shared_version: u64,
-    // #[serde(deserialize_with = "deserialize_hex_vec")]
-    // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
-    #[serde(deserialize_with = "deserialize_wallet_addresses")]
-    pub wallet_addresses: Vec<Address>,
-    pub studio_initial_shared_versions: Vec<u64>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct LoadFileKeysResponse {
-    pub successes: Vec<Address>,
-    pub failures: Vec<Address>,
-    pub initial_shared_versions: Vec<(Address, u64)>, // wallet_address -> initial_shared_version
-}
-
-pub async fn fetch_keys(
-    State(state): State<Arc<AppState>>,
-    Json(request): Json<LoadFileKeysRequest>,
-) -> Result<Json<LoadFileKeysResponse>, EnclaveError> {
-    let mut client = state.sui_client.lock().await;
-
-    let requests: Vec<GetObjectRequest> = request
-        .wallet_addresses
-        .iter()
-        .map(|addr| {
-            let studio_id = SEAL_CONFIG
-                .studio_config_shared_object_id
-                .derive_object_id(&TypeTag::Address, addr.as_bytes());
-            GetObjectRequest::new(&studio_id)
-        })
-        .collect();
-
-    // Fetch all studios (some may be missing)
-    let response = client
-        .ledger_client()
-        .batch_get_objects(
-            BatchGetObjectsRequest::const_default()
-                .with_requests(requests)
-                .with_read_mask(FieldMask::from_paths(vec!["bcs", "owner"])),
-        )
-        .await
-        .map_err(|e| EnclaveError::GenericError(format!("batch_get_objects_error: {e}")))?
-        .into_inner();
-
-    let mut successes = Vec::new();
-    let mut failures = Vec::new();
-    let mut initial_shared_versions = Vec::new();
-
-    for (wallet_addr, result) in request
-        .wallet_addresses
-        .into_iter()
-        .zip(response.objects.into_iter())
-    {
-        match parse_studio_from_result(result) {
-            Ok(Some((studio, initial_shared_version))) => {
-                initial_shared_versions.push((wallet_addr, initial_shared_version));
-                if studio.encrypted_file_key.is_some() {
-                    successes.push(wallet_addr);
-                } else {
-                    failures.push(wallet_addr);
-                };
-            }
-            Ok(None) => {
-                // Studio exists but encrypted_file_key = None
-                failures.push(wallet_addr);
-            }
-            Err(_err) => {
-                // Studio missing, or parsing failed
-                failures.push(wallet_addr);
-            }
-        }
-    }
-
-    Ok(Json(LoadFileKeysResponse {
-        successes,
-        failures,
-        initial_shared_versions,
-    }))
-}
-
-fn parse_studio_from_result(
-    result: GetObjectResult,
-) -> Result<Option<(Studio, u64)>, EnclaveError> {
-    // Handle RPC error from the server
-    if let Some(status) = result.error_opt() {
-        if status.code != 0 {
-            return Err(EnclaveError::GenericError(format!(
-                "RPC error {}: {}",
-                status.code, status.message
-            )));
-        }
-    }
-
-    // Extract the Object
-    let Some(object) = result.object_opt() else {
-        return Ok(None);
-    };
-
-    // Extract initial_shared_version from owner
-    let initial_shared_version = match &object.owner {
-        Some(owner) => {
-            if owner.kind.is_some() {
-                owner.version.unwrap_or(0)
-            } else {
-                return Err(EnclaveError::GenericError(
-                    "Object is not shared".to_string(),
-                ));
-            }
-        }
-        None => {
-            return Err(EnclaveError::GenericError(
-                "Object has no owner information".to_string(),
-            ));
-        }
-    };
-
-    // ---- IMPORTANT ----
-    let Some(contents) = &object.contents else {
-        return Ok(None);
-    };
-
-    // Extract BCS bytes
-    let Some(bytes) = &contents.value else {
-        return Ok(None);
-    };
-
-    // Decode into your Rust struct
-    let studio: Studio = bcs::from_bytes(bytes)
-        .map_err(|e| EnclaveError::GenericError(format!("BCS decode Studio failed: {e}")))?;
-
-    Ok(Some((studio, initial_shared_version)))
-}
-
 /// Helper function that creates a PTB with multiple commands for
 /// the given IDs and the enclave shared object.
 async fn create_ptb(
@@ -478,7 +479,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     #[tokio::test]
-    async fn test_fetch_keys_returns_file_key() {
+    async fn test_load_keys_returns_file_key() {
         // Prepare a wallet address
         let wallet_address: Address =
             "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
@@ -498,7 +499,7 @@ mod tests {
             studio_initial_shared_versions: vec![645292722],
         };
 
-        let response = fetch_keys(State(state), Json(request)).await;
+        let response = load_keys(State(state), Json(request)).await;
 
         match response {
             Ok(json) => {
@@ -541,6 +542,53 @@ mod tests {
         match response {
             Ok(json) => {
                 println!("Successes: {:?}", json.succeed);
+            }
+            Err(e) => {
+                println!("Error fetching keys: {e:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_df() {
+        let seal_server: Address =
+            "0x73d05d62c18d9374e3ea529e8e0ed6161da1a141a94d3f76ae3fe4e99356db75"
+                .parse()
+                .unwrap();
+
+        let df_id =
+            seal_server.derive_dynamic_child_id(&TypeTag::U64, &bcs::to_bytes(&1_u64).unwrap());
+
+        println!("df_id:{df_id}");
+    }
+
+    #[tokio::test]
+    async fn test_init_parameter_load() {
+        let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
+        let sui_client = Arc::new(Mutex::new(Client::new(Client::TESTNET_FULLNODE).unwrap()));
+        let state = Arc::new(AppState { eph_kp, sui_client });
+
+        let wallet_address: Address =
+            "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
+                .parse()
+                .unwrap();
+        let enclave_object_id: Address =
+            "0x9f97ef73b0cb7ffcc61e895fe2b2eca01ad392c8bbcb93aede36a19a2cf574f9"
+                .parse()
+                .unwrap();
+
+        let request = InitParameterLoadRequest {
+            enclave_object_id,
+            initial_shared_version: 657054973,
+            wallet_addresses: vec![wallet_address],
+            studio_initial_shared_versions: vec![645292722],
+        };
+
+        let response = init_parameter_load(State(state), Json(request)).await;
+
+        match response {
+            Ok(json) => {
+                println!("Successes: {:?}", json.encoded_request);
             }
             Err(e) => {
                 println!("Error fetching keys: {e:?}");

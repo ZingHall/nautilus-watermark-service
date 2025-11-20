@@ -49,3 +49,15 @@ pub struct DerivedObjectBag {
     pub id: Address,
     pub size: u64,
 }
+
+#[derive(Deserialize, Serialize)]
+pub struct Wrapper<T> {
+    pub name: T,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct Field<Name, Value> {
+    pub id: Address,
+    pub name: Name,
+    pub value: Value,
+}
