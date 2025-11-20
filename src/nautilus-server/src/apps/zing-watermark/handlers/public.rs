@@ -13,7 +13,14 @@ use crate::{
     common::{
         to_signed_response, IntentMessage, IntentScope, ProcessDataRequest, ProcessedDataResponse,
     },
-    zing_watermark::{get_file_key_for_wallet, FILE_KEYS, ZING_FILE_KEY_IV_12_BYTES},
+    zing_watermark::{
+        get_file_key_for_wallet,
+        handlers::private::{
+            fetch_file_keys, DecryptFileKeysRequest, DecryptFileKeysResponse, FetchFileKeysRequest,
+            FetchFileKeysResponse, GetSealEncodedRequestsParams, GetSealEncodedRequestsResponse,
+        },
+        FILE_KEYS, SEAL_CONFIG, ZING_FILE_KEY_IV_12_BYTES,
+    },
     AppState, EnclaveError,
 };
 
@@ -62,6 +69,100 @@ pub async fn list_file_keys(Query(pagination): Query<Pagination>) -> Json<FileKe
         limit,
         wallets,
     })
+}
+
+/// Response returned to the caller of the single-orchestrator endpoint.
+#[derive(Debug, Serialize)]
+pub struct RefreshResponse {
+    /// how many keys the enclave loaded
+    pub updated: usize,
+    /// how many wallets were requested / considered
+    pub total_wallets: usize,
+}
+
+pub async fn post_file_keys(
+    state: State<Arc<AppState>>,
+    json: Json<FetchFileKeysRequest>,
+) -> Result<Json<RefreshResponse>, EnclaveError> {
+    post_file_keys_(state, json, "http://localhost:3001/seal/encoded_requests").await
+}
+
+/// Single public endpoint that runs steps 1 -> 4 by orchestrating between
+/// public server and enclave (enclave endpoints are reached via HTTP on localhost).
+pub async fn post_file_keys_(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<FetchFileKeysRequest>,
+    host_base_url: &str, // <--- configurable base URL
+) -> Result<Json<RefreshResponse>, EnclaveError> {
+    let fetch_resp_json = fetch_file_keys(State(state.clone()), Json(request))
+        .await
+        .map_err(|e| EnclaveError::GenericError(format!("fetch_file_keys failed: {e:?}")))?;
+
+    // Extract the inner FetchFileKeysResponse (axum::Json<T> is a wrapper)
+    let fetch_resp: FetchFileKeysResponse = fetch_resp_json.0;
+
+    // Build the GET/POST body for step 2 (encoded request)
+    let studio_versions: Vec<u64> = fetch_resp
+        .initial_shared_versions
+        .iter()
+        .map(|(_, v)| *v)
+        .collect();
+
+    let get_req_params = GetSealEncodedRequestsParams {
+        wallet_addresses: fetch_resp.successes.clone(),
+        studio_initial_shared_versions: studio_versions,
+    };
+
+    // Step 2: call enclave to get the encoded request (this touches enclave secrets)
+    let client = reqwest::Client::new();
+    let encoded_resp: GetSealEncodedRequestsResponse = client
+        .post(host_base_url)
+        .json(&get_req_params)
+        .send()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (encoded_requests) send error: {e}"))
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (encoded_requests) json error: {e}"))
+        })?;
+    let seal_responses = crate::zing_watermark::handlers::seal::fetch_seal_keys(
+        state.sui_client.clone(),
+        &SEAL_CONFIG.key_servers,
+        encoded_resp.encoded_request.clone(),
+    )
+    .await
+    .map_err(|e| EnclaveError::GenericError(format!("fetch_seal_keys failed: {e:?}")))?;
+
+    let decrypt_request = DecryptFileKeysRequest {
+        wallet_addresses: fetch_resp.successes.clone(),
+        encrypted_objects: fetch_resp.encrypted_objects.clone(),
+        seal_responses,
+    };
+
+    let decrypt_resp: DecryptFileKeysResponse = client
+        .post("http://localhost:3001/seal/decrypt_file_keys")
+        .json(&decrypt_request)
+        .send()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (decrypt_file_keys) send error: {e}"))
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (decrypt_file_keys) json error: {e}"))
+        })?;
+
+    // Build a small summary response to the caller
+    let refresh_resp = RefreshResponse {
+        updated: decrypt_resp.loaded_keys_count,
+        total_wallets: fetch_resp.successes.len(),
+    };
+
+    Ok(Json(refresh_resp))
 }
 
 /// Inner type T for IntentMessage<T>

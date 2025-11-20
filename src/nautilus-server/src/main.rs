@@ -2,7 +2,9 @@ use anyhow::Result;
 use axum::{routing::get, routing::post, Router};
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
 use nautilus_server::common::{get_attestation, health_check};
-use nautilus_server::zing_watermark::handlers::public::{decrypt_files, list_file_keys};
+use nautilus_server::zing_watermark::handlers::public::{
+    decrypt_files, list_file_keys, post_file_keys,
+};
 use nautilus_server::AppState;
 use std::sync::Arc;
 use sui_rpc::Client;
@@ -27,6 +29,7 @@ async fn main() -> Result<()> {
         .route("/get_attestation", get(get_attestation))
         .route("/health_check", get(health_check))
         .route("/file_keys", get(list_file_keys))
+        .route("/file_keys", post(post_file_keys))
         .route("/files/decrypt", post(decrypt_files))
         .with_state(state)
         .layer(cors);
@@ -44,12 +47,31 @@ async fn ping() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use axum::{routing::get, Router};
-    use fastcrypto::encoding::{Encoding, Hex};
-    use nautilus_server::zing_watermark::FILE_KEYS;
+    use axum::{extract::State, routing::get, Json, Router};
+    use fastcrypto::{
+        ed25519::Ed25519KeyPair,
+        encoding::{Encoding, Hex},
+        traits::KeyPair,
+    };
+    use nautilus_server::{
+        zing_watermark::{
+            handlers::{
+                private::{setup_enclave_object, FetchFileKeysRequest, SetupRequest},
+                public::post_file_keys_,
+            },
+            FILE_KEYS,
+        },
+        AppState,
+    };
+    use serde_json::json;
     use serde_json::Value;
+    use std::sync::Arc;
+    use sui_rpc::Client;
     use sui_sdk_types::Address;
+    use tokio::sync::Mutex;
     use tower::ServiceExt; // for `oneshot`
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
     async fn test_list_file_keys_basic() {
@@ -207,5 +229,77 @@ mod tests {
 
         assert_eq!(json["total_wallets"], 0);
         assert_eq!(json["wallets"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_post_file_keys() {
+        // ------------------------
+        // 0. Setup AppState
+        // ------------------------
+        let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
+        let sui_client = Arc::new(Mutex::new(Client::new(Client::TESTNET_FULLNODE).unwrap()));
+        let state = Arc::new(AppState { eph_kp, sui_client });
+
+        // Setup ENCLAVE_OBJECT (simulate admin bootstrap)
+        let enclave_object_id: Address =
+            "0x9f97ef73b0cb7ffcc61e895fe2b2eca01ad392c8bbcb93aede36a19a2cf574f9"
+                .parse()
+                .unwrap();
+        let request = SetupRequest { enclave_object_id };
+        let _ = setup_enclave_object(State(state.clone()), Json(request))
+            .await
+            .unwrap();
+
+        // ------------------------
+        // 1. Start Wiremock server
+        // ------------------------
+        let mock_server = MockServer::start().await;
+
+        // Mock /seal/encoded_requests
+        Mock::given(method("POST"))
+            .and(path("/seal/encoded_requests"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "encoded_request": "deadbeef"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock /seal/decrypt_file_keys
+        Mock::given(method("POST"))
+            .and(path("/seal/decrypt_file_keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "loaded_keys_count": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // ------------------------
+        // 2. Prepare FetchFileKeysRequest
+        // ------------------------
+        let wallet_address: Address =
+            "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
+                .parse()
+                .unwrap();
+        let request = FetchFileKeysRequest {
+            wallet_addresses: vec![wallet_address],
+            studio_initial_shared_versions: vec![645292722],
+        };
+
+        // ------------------------
+        // 3. Call post_file_keys with mock server base URL
+        // ------------------------
+        let response = post_file_keys_(State(state.clone()), Json(request), &mock_server.uri())
+            .await
+            .unwrap();
+
+        // ------------------------
+        // 4. Assertions
+        // ------------------------
+        assert_eq!(response.updated, 1);
+
+        // Ensure FILE_KEYS mapping updated
+        let guard = FILE_KEYS.read().await;
+        assert!(guard.contains_key(&wallet_address));
+        assert_eq!(guard.get(&wallet_address).unwrap().len(), 32);
     }
 }
