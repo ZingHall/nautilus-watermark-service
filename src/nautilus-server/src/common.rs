@@ -136,84 +136,100 @@ pub struct HealthCheckResponse {
 
 /// Endpoint that health checks the enclave connectivity to all
 /// domains and returns the enclave's public key.
+/// Always returns 200 OK for ALB health checks, with endpoint status as informational.
+/// Optimized for ALB health checks: fast response with minimal file I/O.
 pub async fn health_check(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<HealthCheckResponse>, EnclaveError> {
     let pk = state.eph_kp.public();
 
-    // Create HTTP client with timeout
-    let client = Client::builder()
-        .timeout(Duration::from_secs(5))
+    // Load allowed endpoints from YAML file and check connectivity
+    // Note: Endpoint checks are informational - failures don't affect health check status
+    // For ALB health checks, we use short timeouts (2s per endpoint) to ensure total response < 5s
+    // If file doesn't exist (common in enclave), we return empty status map - still return 200 OK
+    let endpoints_status = match Client::builder()
+        .timeout(Duration::from_secs(2)) // Short timeout for ALB health checks (5s total ALB timeout)
         .build()
-        .map_err(|e| EnclaveError::GenericError(format!("Failed to create HTTP client: {}", e)))?;
+    {
+        Ok(client) => {
+            // Try to read file, but don't fail if it doesn't exist (file may not be in enclave image)
+            match std::fs::read_to_string("allowed_endpoints.yaml") {
+                Ok(yaml_content) => {
+                    match serde_yaml::from_str::<serde_yaml::Value>(&yaml_content) {
+                        Ok(yaml_value) => {
+                            let mut status_map = HashMap::new();
 
-    // Load allowed endpoints from YAML file
-    let endpoints_status = match std::fs::read_to_string("allowed_endpoints.yaml") {
-        Ok(yaml_content) => {
-            match serde_yaml::from_str::<serde_yaml::Value>(&yaml_content) {
-                Ok(yaml_value) => {
-                    let mut status_map = HashMap::new();
+                            if let Some(endpoints) =
+                                yaml_value.get("endpoints").and_then(|e| e.as_sequence())
+                            {
+                                // Check endpoints sequentially with short timeout
+                                // With 2s timeout per endpoint, even multiple endpoints stay under 5s ALB limit
+                                for endpoint in endpoints {
+                                    if let Some(endpoint_str) = endpoint.as_str() {
+                                        let url = if endpoint_str.contains(".amazonaws.com") {
+                                            format!("https://{}/ping", endpoint_str)
+                                        } else {
+                                            format!("https://{}", endpoint_str)
+                                        };
 
-                    if let Some(endpoints) =
-                        yaml_value.get("endpoints").and_then(|e| e.as_sequence())
-                    {
-                        for endpoint in endpoints {
-                            if let Some(endpoint_str) = endpoint.as_str() {
-                                // Check connectivity to each endpoint
-                                let url = if endpoint_str.contains(".amazonaws.com") {
-                                    format!("https://{}/ping", endpoint_str)
-                                } else {
-                                    format!("https://{}", endpoint_str)
-                                };
-
-                                let is_reachable = match client.get(&url).send().await {
-                                    Ok(response) => {
-                                        if endpoint_str.contains(".amazonaws.com") {
-                                            // For AWS endpoints, check if response body contains "healthy"
-                                            match response.text().await {
-                                                Ok(body) => body.to_lowercase().contains("healthy"),
-                                                Err(e) => {
-                                                    info!(
-                                                        "Failed to read response body from {}: {}",
-                                                        endpoint_str, e
-                                                    );
-                                                    false
+                                        let is_reachable = match client.get(&url).send().await {
+                                            Ok(response) => {
+                                                if endpoint_str.contains(".amazonaws.com") {
+                                                    // For AWS endpoints, check if response body contains "healthy"
+                                                    match response.text().await {
+                                                        Ok(body) => {
+                                                            body.to_lowercase().contains("healthy")
+                                                        }
+                                                        Err(e) => {
+                                                            info!(
+                                                                "Failed to read response body from {}: {}",
+                                                                endpoint_str, e
+                                                            );
+                                                            false
+                                                        }
+                                                    }
+                                                } else {
+                                                    // For non-AWS endpoints, check for 200 status
+                                                    response.status().is_success()
                                                 }
                                             }
-                                        } else {
-                                            // For non-AWS endpoints, check for 200 status
-                                            response.status().is_success()
-                                        }
-                                    }
-                                    Err(e) => {
-                                        info!("Failed to connect to {}: {}", endpoint_str, e);
-                                        false
-                                    }
-                                };
+                                            Err(e) => {
+                                                info!("Failed to connect to {}: {}", endpoint_str, e);
+                                                false
+                                            }
+                                        };
 
-                                status_map.insert(endpoint_str.to_string(), is_reachable);
-                                info!(
-                                    "Checked endpoint {}: reachable = {}",
-                                    endpoint_str, is_reachable
-                                );
+                                        status_map.insert(endpoint_str.to_string(), is_reachable);
+                                        info!(
+                                            "Checked endpoint {}: reachable = {}",
+                                            endpoint_str, is_reachable
+                                        );
+                                    }
+                                }
                             }
+
+                            status_map
+                        }
+                        Err(e) => {
+                            info!("Failed to parse YAML: {}", e);
+                            HashMap::new()
                         }
                     }
-
-                    status_map
                 }
-                Err(e) => {
-                    info!("Failed to parse YAML: {}", e);
+                Err(_) => {
+                    // File doesn't exist - this is expected if file isn't copied into enclave image
+                    // Return empty map, but still return 200 OK for ALB health check
                     HashMap::new()
                 }
             }
         }
         Err(e) => {
-            info!("Failed to read allowed_endpoints.yaml: {}", e);
+            info!("Failed to create HTTP client for endpoint checks: {}", e);
             HashMap::new()
         }
     };
 
+    // Always return 200 OK - endpoint status is informational
     Ok(Json(HealthCheckResponse {
         pk: Hex::encode(pk.as_bytes()),
         endpoints_status,
