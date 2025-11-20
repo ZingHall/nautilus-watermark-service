@@ -2,8 +2,8 @@ pub mod handlers;
 pub mod models;
 pub mod types;
 
-use crate::zing_watermark::handlers::private::load_keys;
-use crate::zing_watermark::handlers::private::setup;
+use crate::zing_watermark::handlers::private::fetch_file_keys;
+use crate::zing_watermark::handlers::private::setup_enclave_object;
 use crate::AppState;
 use crate::EnclaveError;
 use axum::Json;
@@ -11,7 +11,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-pub use handlers::private::{complete_parameter_load, init_parameter_load};
+pub use handlers::private::{decrypt_file_keys, get_seal_encoded_requests};
 use rand::thread_rng;
 use seal_sdk::{genkey, ElGamalSecretKey};
 use serde::{Deserialize, Serialize};
@@ -68,13 +68,10 @@ pub async fn ping() -> Json<PingResponse> {
 pub async fn spawn_host_init_server(state: Arc<AppState>) -> Result<(), EnclaveError> {
     let host_app = Router::new()
         .route("/ping", get(ping))
-        .route("/setup", post(setup))
-        .route("/seal/init_parameter_load", post(init_parameter_load))
-        .route(
-            "/seal/complete_parameter_load",
-            post(complete_parameter_load),
-        )
-        .route("/load_keys", post(load_keys))
+        .route("/setup_enclave_object", post(setup_enclave_object))
+        .route("/seal/encoded_requests", post(get_seal_encoded_requests))
+        .route("/seal/decrypt_file_keys", post(decrypt_file_keys))
+        .route("/seal/fetch_file_keys", post(fetch_file_keys))
         .with_state(state);
 
     let host_listener = TcpListener::bind("0.0.0.0:3001")

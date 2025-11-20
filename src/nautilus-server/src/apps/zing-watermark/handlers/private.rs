@@ -37,11 +37,11 @@ pub struct SetupResponse {
     pub succeed: bool,
 }
 
-pub async fn setup(
+pub async fn setup_enclave_object(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SetupRequest>,
 ) -> Result<Json<SetupResponse>, EnclaveError> {
-    // this should validate in production as we should not update enclave access control so easily
+    // this should validate in production as we should not update enclave so easily
     // if ENCLAVE_OBJECT.read().await.is_some() {
     //     return Err(EnclaveError::GenericError(
     //         "ENCLAVE_OBJECT already set".to_string(),
@@ -93,7 +93,7 @@ pub async fn setup(
 
 // load keys
 #[derive(Serialize, Deserialize)]
-pub struct LoadFileKeysRequest {
+pub struct FetchFileKeysRequest {
     // #[serde(deserialize_with = "deserialize_hex_vec")]
     // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
     #[serde(deserialize_with = "deserialize_wallet_addresses")]
@@ -102,17 +102,17 @@ pub struct LoadFileKeysRequest {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct LoadFileKeysResponse {
+pub struct FetchFileKeysResponse {
     pub successes: Vec<Address>,
     pub failures: Vec<Address>,
     pub initial_shared_versions: Vec<(Address, u64)>, // wallet_address -> initial_shared_version
     pub encrypted_objects: Vec<EncryptedObject>,
 }
 
-pub async fn load_keys(
+pub async fn fetch_file_keys(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<LoadFileKeysRequest>,
-) -> Result<Json<LoadFileKeysResponse>, EnclaveError> {
+    Json(request): Json<FetchFileKeysRequest>,
+) -> Result<Json<FetchFileKeysResponse>, EnclaveError> {
     let mut client = state.sui_client.lock().await;
 
     let requests: Vec<GetObjectRequest> = request
@@ -153,13 +153,15 @@ pub async fn load_keys(
         match parse_studio_from_result(result) {
             Ok(Some((studio, initial_shared_version))) => {
                 if let Some(encrypted_file_key) = studio.encrypted_file_key {
-                    successes.push(wallet_addr);
-                    initial_shared_versions.push((wallet_addr, initial_shared_version));
-                    let encrypted_object: EncryptedObject = bcs::from_bytes(&encrypted_file_key)
-                        .map_err(|e| {
-                            EnclaveError::GenericError(format!("batch_get_objects_error: {e}"))
-                        })?;
-                    encrypted_objects.push(encrypted_object);
+                    if let Ok(encrypted_object) =
+                        bcs::from_bytes::<EncryptedObject>(&encrypted_file_key)
+                    {
+                        encrypted_objects.push(encrypted_object);
+                        successes.push(wallet_addr);
+                        initial_shared_versions.push((wallet_addr, initial_shared_version));
+                    } else {
+                        failures.push(wallet_addr);
+                    }
                 } else {
                     failures.push(wallet_addr);
                 };
@@ -175,7 +177,7 @@ pub async fn load_keys(
         }
     }
 
-    Ok(Json(LoadFileKeysResponse {
+    Ok(Json(FetchFileKeysResponse {
         successes,
         failures,
         initial_shared_versions,
@@ -203,31 +205,28 @@ fn parse_studio_from_result(
     Ok(Some((studio, version)))
 }
 
-// init_parameter_load
+// get_seal_encoded_requests
 #[derive(Serialize, Deserialize)]
-pub struct InitParameterLoadRequest {
-    // #[serde(deserialize_with = "deserialize_hex_vec")]
-    // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
+pub struct GetSealEncodedRequestsParams {
     #[serde(deserialize_with = "deserialize_wallet_addresses")]
     pub wallet_addresses: Vec<Address>,
     pub studio_initial_shared_versions: Vec<u64>,
 }
 
-/// Response for /init_parameter_load
 #[derive(Serialize, Deserialize)]
-pub struct InitParameterLoadResponse {
+pub struct GetSealEncodedRequestsResponse {
     pub encoded_request: String,
 }
 
-pub async fn init_parameter_load(
+pub async fn get_seal_encoded_requests(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<InitParameterLoadRequest>,
-) -> Result<Json<InitParameterLoadResponse>, EnclaveError> {
+    Json(request): Json<GetSealEncodedRequestsParams>,
+) -> Result<Json<GetSealEncodedRequestsResponse>, EnclaveError> {
     let enclave_object_guard = ENCLAVE_OBJECT.read().await;
     let enclave_object_opt = &*enclave_object_guard;
 
     let enclave_object = enclave_object_opt
-        .as_ref() // if you want a reference; remove if you want ownership
+        .as_ref()
         .ok_or_else(|| EnclaveError::GenericError("Enclave object not setup".to_string()))?;
 
     // Generate the session and create certificate.
@@ -309,14 +308,14 @@ pub async fn init_parameter_load(
         certificate,
     };
 
-    Ok(Json(InitParameterLoadResponse {
+    Ok(Json(GetSealEncodedRequestsResponse {
         encoded_request: Hex::encode(bcs::to_bytes(&request).expect("should not fail")),
     }))
 }
 
-/// Request for /complete_parameter_load
+// decrypt_file_keys
 #[derive(Serialize, Deserialize)]
-pub struct CompleteParameterLoadRequest {
+pub struct DecryptFileKeysRequest {
     #[serde(deserialize_with = "deserialize_wallet_addresses")]
     pub wallet_addresses: Vec<Address>,
     #[serde(deserialize_with = "deserialize_encrypted_objects")]
@@ -325,10 +324,15 @@ pub struct CompleteParameterLoadRequest {
     pub seal_responses: Vec<(Address, FetchKeyResponse)>,
 }
 
-pub async fn complete_parameter_load(
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DecryptFileKeysResponse {
+    pub loaded_keys_count: usize,
+}
+
+pub async fn decrypt_file_keys(
     State(_state): State<Arc<AppState>>,
-    Json(request): Json<CompleteParameterLoadRequest>,
-) -> Result<Json<CompleteParameterLoadResponse>, EnclaveError> {
+    Json(request): Json<DecryptFileKeysRequest>,
+) -> Result<Json<DecryptFileKeysResponse>, EnclaveError> {
     // Load the encryption secret key and try decrypting all encrypted objects.
     let (enc_secret, _enc_key, _enc_verification_key) = &*ENCRYPTION_KEYS;
     let decrypted_results = seal_decrypt_all_objects(
@@ -373,7 +377,7 @@ pub async fn complete_parameter_load(
         file_keys_guard.insert(*wallet_address, file_key_bytes.clone());
     }
 
-    Ok(Json(CompleteParameterLoadResponse {
+    Ok(Json(DecryptFileKeysResponse {
         loaded_keys_count: decrypted_results.len(),
     }))
 }
@@ -469,7 +473,7 @@ mod tests {
 
         let request = SetupRequest { enclave_object_id };
 
-        let response = setup(State(state.clone()), Json(request)).await;
+        let response = setup_enclave_object(State(state.clone()), Json(request)).await;
         if let Ok(json) = response {
             assert!(json.succeed)
         };
@@ -487,20 +491,20 @@ mod tests {
         .map(|id| id.parse().unwrap())
         .collect();
 
-        let request = LoadFileKeysRequest {
+        let request = FetchFileKeysRequest {
             wallet_addresses: vec![wallet_address],
             studio_initial_shared_versions: vec![645292722],
         };
 
-        let response = load_keys(State(state.clone()), Json(request)).await;
+        let response = fetch_file_keys(State(state.clone()), Json(request)).await;
         if let Ok(json) = response {
             let encrypted_objects = json.encrypted_objects.clone();
             let (success_addresses, success_versions): (Vec<Address>, Vec<u64>) =
                 json.initial_shared_versions.clone().into_iter().unzip();
             // 2. get encoded_request for fetching_keys
-            let res = init_parameter_load(
+            let res = get_seal_encoded_requests(
                 State(state.clone()),
-                Json(InitParameterLoadRequest {
+                Json(GetSealEncodedRequestsParams {
                     wallet_addresses: success_addresses.clone(),
                     studio_initial_shared_versions: success_versions,
                 }),
@@ -513,9 +517,9 @@ mod tests {
                         .await;
 
                 if let Ok(json) = fetch_seal_keys_response {
-                    let results = complete_parameter_load(
+                    let results = decrypt_file_keys(
                         State(state),
-                        Json(CompleteParameterLoadRequest {
+                        Json(DecryptFileKeysRequest {
                             wallet_addresses: success_addresses,
                             encrypted_objects,
                             seal_responses: json,
@@ -548,7 +552,7 @@ mod tests {
 
         let request = SetupRequest { enclave_object_id };
 
-        let response = setup(State(state), Json(request)).await;
+        let response = setup_enclave_object(State(state), Json(request)).await;
 
         assert!(response.is_ok());
 

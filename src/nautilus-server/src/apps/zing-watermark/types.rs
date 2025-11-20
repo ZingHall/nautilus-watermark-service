@@ -163,10 +163,3 @@ impl TryFrom<SealConfigRaw> for SealConfig {
         })
     }
 }
-
-/// Response for /complete_parameter_load, for demo on decrypting many secrets.
-/// Can be removed for your own app.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompleteParameterLoadResponse {
-    pub loaded_keys_count: usize,
-}
