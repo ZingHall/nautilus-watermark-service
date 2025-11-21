@@ -37,6 +37,10 @@ base64 = "0.22.1"
 aes-gcm = "0.10.3"
 sui-rpc = "0.1.0"
 
+[features]
+default = []
+zing-watermark = []
+
 [dev-dependencies]
 axum-test = "18.2.1"
 http = "1.3.1"
