@@ -84,7 +84,9 @@ pub async fn post_file_keys(
     state: State<Arc<AppState>>,
     json: Json<FetchFileKeysRequest>,
 ) -> Result<Json<RefreshResponse>, EnclaveError> {
-    post_file_keys_(state, json, "http://localhost:3001/seal/encoded_requests").await
+    let host_url =
+        std::env::var("HOST_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    post_file_keys_(state, json, &host_url).await
 }
 
 /// Single public endpoint that runs steps 1 -> 4 by orchestrating between
@@ -116,7 +118,7 @@ pub async fn post_file_keys_(
     // Step 2: call enclave to get the encoded request (this touches enclave secrets)
     let client = reqwest::Client::new();
     let encoded_resp: GetSealEncodedRequestsResponse = client
-        .post(host_base_url)
+        .post(format!("{host_base_url}/seal/encoded_requests"))
         .json(&get_req_params)
         .send()
         .await
@@ -128,6 +130,8 @@ pub async fn post_file_keys_(
         .map_err(|e| {
             EnclaveError::GenericError(format!("reqwest (encoded_requests) json error: {e}"))
         })?;
+
+    print!("encoded_resp:{0}", encoded_resp.encoded_request);
     let seal_responses = crate::zing_watermark::handlers::seal::fetch_seal_keys(
         state.sui_client.clone(),
         &SEAL_CONFIG.key_servers,
@@ -143,7 +147,7 @@ pub async fn post_file_keys_(
     };
 
     let decrypt_resp: DecryptFileKeysResponse = client
-        .post("http://localhost:3001/seal/decrypt_file_keys")
+        .post(format!("{host_base_url}/seal/decrypt_file_keys"))
         .json(&decrypt_request)
         .send()
         .await

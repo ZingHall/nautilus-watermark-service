@@ -98,7 +98,6 @@ pub struct FetchFileKeysRequest {
     // pub ids: Vec<KeyId>, // all ids for all encrypted objects (hex strings -> Vec<u8>)
     #[serde(deserialize_with = "deserialize_wallet_addresses")]
     pub wallet_addresses: Vec<Address>,
-    pub studio_initial_shared_versions: Vec<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -126,8 +125,6 @@ pub async fn fetch_file_keys(
         })
         .collect();
 
-    println!("requests:{requests:?}");
-    // Fetch all studios (some may be missing)
     let response = client
         .ledger_client()
         .batch_get_objects(
@@ -149,7 +146,6 @@ pub async fn fetch_file_keys(
         .into_iter()
         .zip(response.objects.into_iter())
     {
-        println!("result:{result:?}");
         match parse_studio_from_result(result) {
             Ok(Some((studio, initial_shared_version))) => {
                 if let Some(encrypted_file_key) = studio.encrypted_file_key {
@@ -193,8 +189,6 @@ fn parse_studio_from_result(
     let Some(bytes) = bytes_opt else {
         return Ok(None);
     };
-
-    println!("studio_bytes:{bytes:?}");
 
     // Deserialize Move struct
     let studio: Studio = deserialize_move_struct(&bytes, "Studio")?;
@@ -493,7 +487,6 @@ mod tests {
 
         let request = FetchFileKeysRequest {
             wallet_addresses: vec![wallet_address],
-            studio_initial_shared_versions: vec![645292722],
         };
 
         let response = fetch_file_keys(State(state.clone()), Json(request)).await;

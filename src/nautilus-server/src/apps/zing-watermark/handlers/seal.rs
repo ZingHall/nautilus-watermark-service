@@ -142,10 +142,6 @@ pub async fn fetch_seal_keys(
             FastCryptoError::GeneralError(format!("Failed to fetch key server URLs: {e}"))
         })?
     {
-        println!(
-            "Fetching from {} ({}/v1/fetch_key)",
-            server.name, server.url
-        );
         match client
             .post(format!("{}/v1/fetch_key", server.url))
             .header("Client-Sdk-Type", "rust")
