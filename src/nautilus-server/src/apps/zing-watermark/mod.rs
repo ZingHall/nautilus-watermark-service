@@ -2,7 +2,8 @@ pub mod handlers;
 pub mod models;
 pub mod types;
 
-use crate::zing_watermark::handlers::private::fetch_keys;
+use crate::zing_watermark::handlers::private::fetch_file_keys;
+use crate::zing_watermark::handlers::private::setup_enclave_object;
 use crate::AppState;
 use crate::EnclaveError;
 use axum::Json;
@@ -10,8 +11,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-pub use handlers::private::{complete_parameter_load, init_parameter_load};
-use fastcrypto::groups::bls12381::G1Element;
+pub use handlers::private::{decrypt_file_keys, get_seal_encoded_requests};
 use rand::thread_rng;
 use seal_sdk::{genkey, ElGamalSecretKey};
 use serde::{Deserialize, Serialize};
@@ -36,17 +36,16 @@ lazy_static::lazy_static! {
         serde_yaml::from_str(config_str)
             .expect("Failed to parse seal_config.yaml")
     };
+    // (enclave_object_id, initial_version)
+    pub static ref ENCLAVE_OBJECT: Arc<RwLock<Option<(Address, u64)>>> = {
+        Arc::new(RwLock::new(Option::None))
+    };
     /// Encryption secret key generated initialized on startup.
     pub static ref ENCRYPTION_KEYS: (ElGamalSecretKey, seal_sdk::types::ElGamalPublicKey, seal_sdk::types::ElgamalVerificationKey) = {
         genkey(&mut thread_rng())
     };
 
-    /// Cached Seal keys for decrypting encrypted objects.
-    /// Reference: https://github.com/MystenLabs/nautilus/blob/seal-updates/src/nautilus-server/src/apps/seal-example/endpoints.rs
-    pub static ref CACHED_KEYS: Arc<RwLock<HashMap<Vec<u8>, HashMap<Address, G1Element>>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-   /// Maps: wallet address ? raw 32-byte FileKey (AES-256 key)
+   /// Maps: wallet address -> raw 32-byte FileKey (AES-256 key)
     pub static ref FILE_KEYS: Arc<RwLock<HashMap<Address, Vec<u8>>>> =
         Arc::new(RwLock::new(HashMap::new()));
 }
@@ -69,12 +68,10 @@ pub async fn ping() -> Json<PingResponse> {
 pub async fn spawn_host_init_server(state: Arc<AppState>) -> Result<(), EnclaveError> {
     let host_app = Router::new()
         .route("/ping", get(ping))
-        .route("/seal/init_parameter_load", post(init_parameter_load))
-        .route(
-            "/seal/complete_parameter_load",
-            post(complete_parameter_load),
-        )
-        .route("/fetch_keys", post(fetch_keys))
+        .route("/setup_enclave_object", post(setup_enclave_object))
+        .route("/seal/fetch_file_keys", post(fetch_file_keys))
+        .route("/seal/encoded_requests", post(get_seal_encoded_requests))
+        .route("/seal/decrypt_file_keys", post(decrypt_file_keys))
         .with_state(state);
 
     let host_listener = TcpListener::bind("0.0.0.0:3001")

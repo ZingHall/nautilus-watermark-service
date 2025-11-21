@@ -114,6 +114,7 @@ pub struct SealConfig {
     pub latest_package_id: Address,
     pub server_pk_map: HashMap<Address, IBEPublicKey>,
     pub studio_config_shared_object_id: Address,
+    pub enclave_config_shared_object_id: Address,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +129,8 @@ struct SealConfigRaw {
     latest_package_id: Address,
     #[serde(deserialize_with = "deserialize_object_id")]
     studio_config_shared_object_id: Address,
+    #[serde(deserialize_with = "deserialize_object_id")]
+    enclave_config_shared_object_id: Address,
 }
 
 impl TryFrom<SealConfigRaw> for SealConfig {
@@ -156,13 +159,7 @@ impl TryFrom<SealConfigRaw> for SealConfig {
             latest_package_id: raw.latest_package_id,
             server_pk_map,
             studio_config_shared_object_id: raw.studio_config_shared_object_id,
+            enclave_config_shared_object_id: raw.enclave_config_shared_object_id,
         })
     }
-}
-
-/// Response for /complete_parameter_load, for demo on decrypting many secrets.
-/// Can be removed for your own app.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CompleteParameterLoadResponse {
-    pub loaded_keys_count: usize,
 }

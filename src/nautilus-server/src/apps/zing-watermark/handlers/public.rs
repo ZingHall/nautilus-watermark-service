@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -10,9 +13,161 @@ use crate::{
     common::{
         to_signed_response, IntentMessage, IntentScope, ProcessDataRequest, ProcessedDataResponse,
     },
-    zing_watermark::{get_file_key_for_wallet, FILE_KEYS, ZING_FILE_KEY_IV_12_BYTES},
+    zing_watermark::{
+        get_file_key_for_wallet,
+        handlers::private::{
+            fetch_file_keys, DecryptFileKeysRequest, DecryptFileKeysResponse, FetchFileKeysRequest,
+            FetchFileKeysResponse, GetSealEncodedRequestsParams, GetSealEncodedRequestsResponse,
+        },
+        FILE_KEYS, SEAL_CONFIG, ZING_FILE_KEY_IV_12_BYTES,
+    },
     AppState, EnclaveError,
 };
+
+/// Query params: /file_keys?page=1&limit=20
+#[derive(Debug, Deserialize)]
+pub struct Pagination {
+    pub page: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileKeysListResponse {
+    pub total_wallets: usize,
+    pub page: usize,
+    pub limit: usize,
+    pub wallets: Vec<String>,
+}
+
+/// Returns **only wallet addresses**, never the secret AES key
+pub async fn list_file_keys(Query(pagination): Query<Pagination>) -> Json<FileKeysListResponse> {
+    let page = pagination.page.unwrap_or(1).max(1);
+    let limit = pagination.limit.unwrap_or(20).max(1);
+
+    let file_keys_guard = FILE_KEYS.read().await;
+
+    let total_wallets = file_keys_guard.len();
+
+    // Extract only wallet addresses
+    let all_wallets: Vec<String> = file_keys_guard
+        .keys()
+        .map(|addr| addr.to_string())
+        .collect();
+
+    let start = (page - 1) * limit;
+    let end = (start + limit).min(all_wallets.len());
+
+    let wallets = if start < all_wallets.len() {
+        all_wallets[start..end].to_vec()
+    } else {
+        vec![]
+    };
+
+    Json(FileKeysListResponse {
+        total_wallets,
+        page,
+        limit,
+        wallets,
+    })
+}
+
+/// Response returned to the caller of the single-orchestrator endpoint.
+#[derive(Debug, Serialize)]
+pub struct RefreshResponse {
+    /// how many keys the enclave loaded
+    pub updated: usize,
+    /// how many wallets were requested / considered
+    pub total_wallets: usize,
+}
+
+pub async fn post_file_keys(
+    state: State<Arc<AppState>>,
+    json: Json<FetchFileKeysRequest>,
+) -> Result<Json<RefreshResponse>, EnclaveError> {
+    let host_url =
+        std::env::var("HOST_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    post_file_keys_(state, json, &host_url).await
+}
+
+/// Single public endpoint that runs steps 1 -> 4 by orchestrating between
+/// public server and enclave (enclave endpoints are reached via HTTP on localhost).
+pub async fn post_file_keys_(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<FetchFileKeysRequest>,
+    host_base_url: &str, // <--- configurable base URL
+) -> Result<Json<RefreshResponse>, EnclaveError> {
+    let fetch_resp_json = fetch_file_keys(State(state.clone()), Json(request))
+        .await
+        .map_err(|e| EnclaveError::GenericError(format!("fetch_file_keys failed: {e:?}")))?;
+
+    // Extract the inner FetchFileKeysResponse (axum::Json<T> is a wrapper)
+    let fetch_resp: FetchFileKeysResponse = fetch_resp_json.0;
+
+    // Build the GET/POST body for step 2 (encoded request)
+    let studio_versions: Vec<u64> = fetch_resp
+        .initial_shared_versions
+        .iter()
+        .map(|(_, v)| *v)
+        .collect();
+
+    let get_req_params = GetSealEncodedRequestsParams {
+        wallet_addresses: fetch_resp.successes.clone(),
+        studio_initial_shared_versions: studio_versions,
+    };
+
+    // Step 2: call enclave to get the encoded request (this touches enclave secrets)
+    let client = reqwest::Client::new();
+    let encoded_resp: GetSealEncodedRequestsResponse = client
+        .post(format!("{host_base_url}/seal/encoded_requests"))
+        .json(&get_req_params)
+        .send()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (encoded_requests) send error: {e}"))
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (encoded_requests) json error: {e}"))
+        })?;
+
+    print!("encoded_resp:{0}", encoded_resp.encoded_request);
+    let seal_responses = crate::zing_watermark::handlers::seal::fetch_seal_keys(
+        state.sui_client.clone(),
+        &SEAL_CONFIG.key_servers,
+        encoded_resp.encoded_request.clone(),
+    )
+    .await
+    .map_err(|e| EnclaveError::GenericError(format!("fetch_seal_keys failed: {e:?}")))?;
+
+    let decrypt_request = DecryptFileKeysRequest {
+        wallet_addresses: fetch_resp.successes.clone(),
+        encrypted_objects: fetch_resp.encrypted_objects.clone(),
+        seal_responses,
+    };
+
+    let decrypt_resp: DecryptFileKeysResponse = client
+        .post(format!("{host_base_url}/seal/decrypt_file_keys"))
+        .json(&decrypt_request)
+        .send()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (decrypt_file_keys) send error: {e}"))
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            EnclaveError::GenericError(format!("reqwest (decrypt_file_keys) json error: {e}"))
+        })?;
+
+    // Build a small summary response to the caller
+    let refresh_resp = RefreshResponse {
+        updated: decrypt_resp.loaded_keys_count,
+        total_wallets: fetch_resp.successes.len(),
+    };
+
+    Ok(Json(refresh_resp))
+}
 
 /// Inner type T for IntentMessage<T>
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -32,7 +187,7 @@ pub struct RequestIntentStruct {
     pub nonce: String,
 }
 
-pub async fn process_data(
+pub async fn decrypt_files(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ProcessDataRequest<RequestIntentStruct>>,
 ) -> Result<Json<ProcessedDataResponse<IntentMessage<DecryptedContentResponse>>>, EnclaveError> {
