@@ -305,14 +305,22 @@ jobs:
             CREATE_PR=true
           fi
           
-          # Create branch if we need a PR, otherwise work on main
+          # Fetch latest changes from remote
+          git fetch origin
+          
+          # Determine the default branch (master or main)
+          DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
+          echo "Default branch is: $DEFAULT_BRANCH"
+          
+          # Create branch if we need a PR, otherwise work on default branch
           if [ "$CREATE_PR" == "true" ]; then
             BRANCH_NAME="update-enclave-eif-${{ steps.shorten-commit.outputs.sha_short }}"
-            git checkout -b "$BRANCH_NAME"
+            git checkout -b "$BRANCH_NAME" "origin/$DEFAULT_BRANCH"
             echo "Created branch: $BRANCH_NAME"
           else
-            git checkout main || git checkout -b main
-            echo "Working on main branch"
+            git checkout "$DEFAULT_BRANCH" || git checkout -b "$DEFAULT_BRANCH"
+            git pull origin "$DEFAULT_BRANCH" --rebase || true
+            echo "Working on $DEFAULT_BRANCH branch"
           fi
           
           # Get the updated file from previous step
@@ -349,8 +357,8 @@ jobs:
             git push origin "$BRANCH_NAME"
             echo "Pushed branch: $BRANCH_NAME"
           else
-            git push origin main
-            echo "Pushed to main branch"
+            git push origin "$DEFAULT_BRANCH"
+            echo "Pushed to $DEFAULT_BRANCH branch"
           fi
 
       - name: Create Pull Request for Terraform changes
@@ -373,6 +381,9 @@ jobs:
           PR_EXISTS=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null || echo "")
           
           if [ -z "$PR_EXISTS" ]; then
+            # Determine the default branch for PR base
+            DEFAULT_BRANCH=$(git remote show origin | grep 'HEAD branch' | cut -d' ' -f5)
+            
             gh pr create \
               --title "Update Enclave EIF Version to ${{ steps.shorten-commit.outputs.sha_short }}" \
               --body "This PR updates the EIF version for the ${{ steps.env.outputs.environment }} environment.
@@ -386,7 +397,7 @@ jobs:
           1. Review the Terraform changes
           2. Merge this PR to apply the update
           3. Or run \`terraform apply\` manually in the environment directory" \
-              --base main
+              --base "$DEFAULT_BRANCH"
             echo "✅ Created PR for EIF version update"
           else
             echo "PR already exists: #$PR_EXISTS"
