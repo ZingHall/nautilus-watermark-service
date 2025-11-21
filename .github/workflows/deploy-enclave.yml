@@ -93,6 +93,48 @@ jobs:
           terraform_version: 1.6.0
           terraform_wrapper: false
 
+      - name: Force unlock Terraform state (if locked)
+        working-directory: zing-infra/environments/${{ steps.env.outputs.environment }}/nautilus-enclave
+        env:
+          TF_BACKEND_BUCKET: terraform-zing-${{ steps.env.outputs.environment }}
+          TF_BACKEND_KEY: nautilus-enclave.tfstate
+          TF_BACKEND_REGION: ${{ env.AWS_REGION }}
+          TF_BACKEND_DYNAMODB_TABLE: terraform-lock-table
+        run: |
+          echo "🔓 Checking for stuck Terraform state lock..."
+          
+          # Initialize Terraform with backend config
+          terraform init -reconfigure \
+            -backend-config="bucket=$TF_BACKEND_BUCKET" \
+            -backend-config="key=$TF_BACKEND_KEY" \
+            -backend-config="region=$TF_BACKEND_REGION" \
+            -backend-config="encrypt=true" \
+            -backend-config="dynamodb_table=$TF_BACKEND_DYNAMODB_TABLE"
+          
+          # Try to force unlock if state is locked
+          # This will fail gracefully if there's no lock
+          set +e  # Don't exit on error
+          terraform force-unlock -force $(terraform state list 2>&1 | grep -oP 'ID:\s+\K[a-f0-9-]+' | head -1) 2>&1 | tee unlock_output.txt
+          UNLOCK_EXIT_CODE=$?
+          set -e
+          
+          if [ "$UNLOCK_EXIT_CODE" = "0" ]; then
+            echo "✅ Successfully unlocked Terraform state"
+          elif grep -q "No lock found" unlock_output.txt || grep -q "Error acquiring the state lock" unlock_output.txt; then
+            echo "ℹ️ No lock found or couldn't get lock info, will retry with init"
+            # Re-initialize to clear any stale lock info
+            terraform init -reconfigure \
+              -backend-config="bucket=$TF_BACKEND_BUCKET" \
+              -backend-config="key=$TF_BACKEND_KEY" \
+              -backend-config="region=$TF_BACKEND_REGION" \
+              -backend-config="encrypt=true" \
+              -backend-config="dynamodb_table=$TF_BACKEND_DYNAMODB_TABLE"
+          else
+            echo "ℹ️ State is not locked or lock already released"
+          fi
+          
+          rm -f unlock_output.txt
+
       - name: Verify Terraform permissions (plan only)
         working-directory: zing-infra/environments/${{ steps.env.outputs.environment }}/nautilus-enclave
         env:
@@ -104,15 +146,6 @@ jobs:
           echo "🔍 Verifying Terraform permissions with terraform plan..."
           echo "This step validates that the IAM role has all required permissions"
           echo "before building EIF files or making any changes."
-          
-          # Initialize Terraform with backend config (without profile for OIDC)
-          # Use -reconfigure to handle backend config changes without migration
-          terraform init -reconfigure \
-            -backend-config="bucket=$TF_BACKEND_BUCKET" \
-            -backend-config="key=$TF_BACKEND_KEY" \
-            -backend-config="region=$TF_BACKEND_REGION" \
-            -backend-config="encrypt=true" \
-            -backend-config="dynamodb_table=$TF_BACKEND_DYNAMODB_TABLE"
           
           # Run terraform plan to verify permissions
           # This will fail if any required permissions are missing
