@@ -679,12 +679,13 @@ jobs:
           fi
           echo "ASG_NAME=$ASG_NAME" >> $GITHUB_ENV
 
-      - name: Scale up for zero-downtime deployment
+      - name: Ensure desired capacity is 1 before refresh
         if: |
           (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply == 'true') ||
           (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'staging')
         run: |
-          echo "📈 Scaling up to 2 instances for zero-downtime deployment..."
+          echo "🔧 Ensuring desired capacity is 1 before instance refresh..."
+          echo "This prevents instance refresh from creating extra instances"
           
           # Get current desired capacity
           CURRENT_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
@@ -694,35 +695,34 @@ jobs:
           
           echo "Current desired capacity: $CURRENT_CAPACITY"
           
-          # Scale up to 2 instances if not already at 2
-          if [ "$CURRENT_CAPACITY" != "2" ]; then
-            echo "Scaling up to 2 instances..."
+          # Set to 1 if not already at 1
+          if [ "$CURRENT_CAPACITY" != "1" ]; then
+            echo "Setting desired capacity to 1..."
             aws autoscaling set-desired-capacity \
               --auto-scaling-group-name "$ASG_NAME" \
-              --desired-capacity 2 \
+              --desired-capacity 1 \
               --honor-cooldown
             
-            echo "Waiting for instances to be in service..."
-            # Wait for instances to be in service using polling
+            echo "Waiting for capacity to stabilize..."
             MAX_WAIT=300  # 5 minutes max wait
             ELAPSED=0
             CHECK_INTERVAL=10  # Check every 10 seconds
             
             while [ $ELAPSED -lt $MAX_WAIT ]; do
+              ACTUAL_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
+                --auto-scaling-group-names "$ASG_NAME" \
+                --query 'AutoScalingGroups[0].DesiredCapacity' \
+                --output text 2>/dev/null || echo "1")
+              
               IN_SERVICE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
                 --auto-scaling-group-names "$ASG_NAME" \
                 --query "AutoScalingGroups[0].Instances[?LifecycleState=='InService'] | length(@)" \
                 --output text 2>/dev/null || echo "0")
               
-              DESIRED_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
-                --auto-scaling-group-names "$ASG_NAME" \
-                --query 'AutoScalingGroups[0].DesiredCapacity' \
-                --output text 2>/dev/null || echo "0")
+              echo "[$((ELAPSED/60))m ${ELAPSED}s] Desired: $ACTUAL_CAPACITY, In service: $IN_SERVICE_COUNT"
               
-              echo "[$((ELAPSED/60))m ${ELAPSED}s] Instances in service: $IN_SERVICE_COUNT / $DESIRED_CAPACITY"
-              
-              if [ "$IN_SERVICE_COUNT" -ge "$DESIRED_CAPACITY" ] && [ "$IN_SERVICE_COUNT" -gt 0 ]; then
-                echo "✅ All instances are in service"
+              if [ "$ACTUAL_CAPACITY" == "1" ] && [ "$IN_SERVICE_COUNT" -eq 1 ]; then
+                echo "✅ Desired capacity is 1 with 1 instance in service"
                 break
               fi
               
@@ -731,15 +731,10 @@ jobs:
             done
             
             if [ $ELAPSED -ge $MAX_WAIT ]; then
-              echo "⚠️  Timeout waiting for instances to be in service, continuing anyway..."
+              echo "⚠️  Timeout waiting for capacity to stabilize, continuing anyway..."
             fi
-            
-            # Give instances a bit more time to fully initialize
-            echo "Waiting 60 seconds for instances to stabilize..."
-            sleep 60
-            echo "✅ Scaled up to 2 instances"
           else
-            echo "✅ Already at 2 instances, no scaling needed"
+            echo "✅ Already at desired capacity 1"
           fi
 
       - name: Trigger Auto Scaling Group Instance Refresh
@@ -778,13 +773,14 @@ jobs:
             fi
           fi
           
-          # Start instance refresh
+          # Start instance refresh with MinHealthyPercentage: 0 to prevent extra instances
+          # Since we're at capacity 1, this ensures only 1 instance is replaced at a time
           REFRESH_ID=$(aws autoscaling start-instance-refresh \
             --auto-scaling-group-name "$ASG_NAME" \
             --preferences '{
-              "MinHealthyPercentage": 50,
+              "MinHealthyPercentage": 0,
               "InstanceWarmup": 300,
-              "CheckpointPercentages": [50, 100],
+              "CheckpointPercentages": [100],
               "CheckpointDelay": 60,
               "SkipMatching": false
             }' \
@@ -866,21 +862,45 @@ jobs:
             echo "Refresh may still be in progress. Check AWS Console for status."
           fi
 
-      - name: Scale down to 1 instance after deployment
+      - name: Verify final instance count
         if: |
           (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply == 'true') ||
           (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'staging')
         run: |
-          echo "📉 Scaling down to 1 instance after successful deployment..."
+          echo "🔍 Verifying final instance count..."
           
-          # Scale down to 1 instance
-          aws autoscaling set-desired-capacity \
-            --auto-scaling-group-name "$ASG_NAME" \
-            --desired-capacity 1 \
-            --honor-cooldown
+          # Get current desired capacity
+          DESIRED_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --query 'AutoScalingGroups[0].DesiredCapacity' \
+            --output text 2>/dev/null || echo "1")
           
-          echo "✅ Scaled down to 1 instance"
-          echo "The Auto Scaling Group will terminate one instance, keeping the newly deployed one"
+          IN_SERVICE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --query "AutoScalingGroups[0].Instances[?LifecycleState=='InService'] | length(@)" \
+            --output text 2>/dev/null || echo "0")
+          
+          echo "Desired capacity: $DESIRED_CAPACITY"
+          echo "Instances in service: $IN_SERVICE_COUNT"
+          
+          # Ensure desired capacity is 1 (should already be 1, but double-check)
+          if [ "$DESIRED_CAPACITY" != "1" ]; then
+            echo "⚠️  Desired capacity is not 1, setting to 1..."
+            aws autoscaling set-desired-capacity \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --desired-capacity 1 \
+              --honor-cooldown
+            echo "✅ Set desired capacity to 1"
+          else
+            echo "✅ Desired capacity is already 1"
+          fi
+          
+          if [ "$IN_SERVICE_COUNT" -gt 1 ]; then
+            echo "⚠️  Warning: $IN_SERVICE_COUNT instances in service (expected 1)"
+            echo "Extra instances will be terminated by Auto Scaling Group"
+          else
+            echo "✅ Instance count is correct: $IN_SERVICE_COUNT"
+          fi
 
       - name: Notify deployment status
         if: always()
