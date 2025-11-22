@@ -24,10 +24,12 @@ async fn main() -> Result<()> {
     let cors = CorsLayer::new().allow_methods(Any).allow_headers(Any);
 
     let app = Router::new()
+        // GET
         .route("/", get(ping))
         .route("/get_attestation", get(get_attestation))
         .route("/health_check", get(health_check))
         .route("/file_keys", get(list_file_keys))
+        // POST
         .route("/file_keys", post(post_file_keys))
         .route("/files/decrypt", post(decrypt_files))
         .with_state(state)
