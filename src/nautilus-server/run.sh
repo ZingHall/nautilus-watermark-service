@@ -21,7 +21,6 @@ busybox ip addr add 127.0.0.1/32 dev lo
 busybox ip link set dev lo up
 
 # Add a hosts record, pointing target site calls to local loopback
-echo "[RUN_SH_DEBUG] Setting up /etc/hosts"
 echo "127.0.0.1   localhost" > /etc/hosts
 
 # Note: /etc/hosts format should be: IP_ADDRESS   HOSTNAME (without https:// or :port)
@@ -36,8 +35,6 @@ echo "127.0.0.1   localhost" > /etc/hosts
 
 # == ATTENTION: code should be generated here that parses allowed_endpoints.yaml and populate domains here ===
 
-echo "[RUN_SH_DEBUG] /etc/hosts configuration:"
-cat /etc/hosts
 
 # Get a json blob with key/value pair for secrets
 JSON_RESPONSE=$(socat - VSOCK-LISTEN:7777,reuseaddr)
@@ -55,7 +52,6 @@ echo "$JSON_RESPONSE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpair
 # Note: Traffic forwarders will be added here by configure_enclave.sh or deploy-enclave.yml
 # Each forwarder bridges: 127.0.0.x:443 -> VSOCK CID 3:810x
 # The vsock-proxy on EC2 host forwards VSOCK traffic to the actual endpoint
-echo "[RUN_SH_DEBUG] Starting traffic forwarders..."
 
 
 

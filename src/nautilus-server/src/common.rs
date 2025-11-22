@@ -147,9 +147,6 @@ pub async fn health_check(
     // Note: Endpoint checks are informational - failures don't affect health check status
     // For ALB health checks, we use short timeouts (2s per endpoint) to ensure total response < 5s
     // If file doesn't exist (common in enclave), we return empty status map - still return 200 OK
-    info!("[ENDPOINT_DEBUG] Starting endpoint connectivity check");
-    
-    // Try multiple possible file paths
     let possible_paths = vec![
         "allowed_endpoints.yaml",
         "./allowed_endpoints.yaml",
@@ -162,142 +159,76 @@ pub async fn health_check(
         .build()
     {
         Ok(client) => {
-            info!("[ENDPOINT_DEBUG] HTTP client created successfully");
-            
             // Try to read file from multiple possible locations
             let mut yaml_content_opt = None;
-            let mut found_path = None;
             
             for path in &possible_paths {
-                info!("[ENDPOINT_DEBUG] Trying to read file from path: {}", path);
                 match std::fs::read_to_string(path) {
                     Ok(content) => {
-                        info!("[ENDPOINT_DEBUG] Successfully read file from: {}", path);
                         yaml_content_opt = Some(content);
-                        found_path = Some(path.to_string());
                         break;
                     }
-                    Err(e) => {
-                        info!("[ENDPOINT_DEBUG] Failed to read from {}: {}", path, e);
+                    Err(_) => {
+                        // Silently continue to next path
                     }
                 }
             }
             
             match yaml_content_opt {
                 Some(yaml_content) => {
-                    info!("[ENDPOINT_DEBUG] File found at: {:?}, content length: {} bytes", found_path, yaml_content.len());
                     match serde_yaml::from_str::<serde_yaml::Value>(&yaml_content) {
                         Ok(yaml_value) => {
-                            info!("[ENDPOINT_DEBUG] YAML parsed successfully");
                             let mut status_map = HashMap::new();
 
                             if let Some(endpoints) =
                                 yaml_value.get("endpoints").and_then(|e| e.as_sequence())
                             {
-                                info!("[ENDPOINT_DEBUG] Found {} endpoints to check", endpoints.len());
                                 // Check endpoints sequentially with short timeout
                                 // With 2s timeout per endpoint, even multiple endpoints stay under 5s ALB limit
-                                for (idx, endpoint) in endpoints.iter().enumerate() {
+                                for endpoint in endpoints.iter() {
                                     if let Some(endpoint_str) = endpoint.as_str() {
-                                        info!("[ENDPOINT_DEBUG] [{}/{}] Checking endpoint: {}", idx + 1, endpoints.len(), endpoint_str);
-                                        
                                         // Extract hostname (remove port number if present)
-                                        // e.g., "fullnode.testnet.sui.io:443" -> "fullnode.testnet.sui.io"
                                         let hostname = endpoint_str.split(':').next().unwrap_or(endpoint_str);
-                                        info!("[ENDPOINT_DEBUG] Extracted hostname: {} (from endpoint: {})", hostname, endpoint_str);
-                                        
-                                        // Check /etc/hosts first
-                                        match std::fs::read_to_string("/etc/hosts") {
-                                            Ok(hosts_content) => {
-                                                info!("[ENDPOINT_DEBUG] /etc/hosts content:\n{}", hosts_content);
-                                                if hosts_content.contains(hostname) {
-                                                    info!("[ENDPOINT_DEBUG] Found {} in /etc/hosts", hostname);
-                                                } else {
-                                                    info!("[ENDPOINT_DEBUG] WARNING: {} NOT found in /etc/hosts", hostname);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                info!("[ENDPOINT_DEBUG] Failed to read /etc/hosts: {}", e);
-                                            }
-                                        }
                                         
                                         // Construct URL using hostname (not endpoint_str) to avoid port duplication
-                                        // HTTPS uses port 443 by default, so we don't need to include it in the URL
                                         let url = if hostname.contains(".amazonaws.com") {
                                             format!("https://{}/ping", hostname)
-                                        } else if hostname.contains("sui.io") {
-                                            format!("https://{}/health", hostname)
                                         } else {
                                             format!("https://{}", hostname)
                                         };
-                                        
-                                        info!("[ENDPOINT_DEBUG] Constructed URL: {}", url);
-                                        info!("[ENDPOINT_DEBUG] Sending HTTP request to: {}", url);
 
                                         let is_reachable = match client.get(&url).send().await {
                                             Ok(response) => {
                                                 let status = response.status();
-                                                info!("[ENDPOINT_DEBUG] Received response from {}: status = {}", endpoint_str, status);
                                                 
                                                 if endpoint_str.contains(".amazonaws.com") {
                                                     // For AWS endpoints, check if response body contains "healthy"
                                                     match response.text().await {
                                                         Ok(body) => {
-                                                            let contains_healthy = body.to_lowercase().contains("healthy");
-                                                            info!("[ENDPOINT_DEBUG] Response body length: {}, contains 'healthy': {}", body.len(), contains_healthy);
-                                                            contains_healthy
+                                                            body.to_lowercase().contains("healthy")
                                                         }
-                                                        Err(e) => {
-                                                            info!(
-                                                                "[ENDPOINT_DEBUG] Failed to read response body from {}: {}",
-                                                                endpoint_str, e
-                                                            );
-                                                            false
-                                                        }
+                                                        Err(_) => false
                                                     }
                                                 } else {
-                                                    // For non-AWS endpoints, check for 200 status
-                                                    let is_success = status.is_success();
-                                                    info!("[ENDPOINT_DEBUG] Status is success: {}", is_success);
-                                                    is_success
+                                                    // For non-AWS endpoints:
+                                                    // - 200-299: Success (endpoint is reachable and working)
+                                                    // - 405: Method Not Allowed (endpoint exists but doesn't accept GET - still reachable!)
+                                                    // - 404: Not Found (endpoint exists but path wrong - still reachable!)
+                                                    let status_code = status.as_u16();
+                                                    status.is_success() || status_code == 405 || status_code == 404
                                                 }
                                             }
-                                            Err(e) => {
-                                                info!(
-                                                    "[ENDPOINT_DEBUG] Failed to connect to {}: {}",
-                                                    endpoint_str, e
-                                                );
-                                                info!("[ENDPOINT_DEBUG] Error details: {:?}", e);
-                                                
-                                                // Try to get more details about the error
-                                                if e.is_timeout() {
-                                                    info!("[ENDPOINT_DEBUG] Error type: TIMEOUT");
-                                                } else if e.is_connect() {
-                                                    info!("[ENDPOINT_DEBUG] Error type: CONNECTION");
-                                                } else if e.is_request() {
-                                                    info!("[ENDPOINT_DEBUG] Error type: REQUEST");
-                                                }
-                                                
-                                                false
-                                            }
+                                            Err(_) => false
                                         };
 
                                         status_map.insert(endpoint_str.to_string(), is_reachable);
-                                        info!(
-                                            "[ENDPOINT_DEBUG] Final result for {}: reachable = {}",
-                                            endpoint_str, is_reachable
-                                        );
                                     }
                                 }
-                            } else {
-                                info!("[ENDPOINT_DEBUG] No endpoints found in YAML file");
                             }
 
                             status_map
                         }
-                        Err(e) => {
-                            info!("[ENDPOINT_DEBUG] Failed to parse YAML: {}", e);
-                            info!("[ENDPOINT_DEBUG] YAML parse error details: {:?}", e);
+                        Err(_) => {
                             HashMap::new()
                         }
                     }
@@ -305,27 +236,14 @@ pub async fn health_check(
                 None => {
                     // File doesn't exist - this is expected if file isn't copied into enclave image
                     // Return empty map, but still return 200 OK for ALB health check
-                    info!("[ENDPOINT_DEBUG] allowed_endpoints.yaml not found in any of the tried paths: {:?}", possible_paths);
-                    match std::env::current_dir() {
-                        Ok(cwd) => {
-                            info!("[ENDPOINT_DEBUG] Current working directory: {:?}", cwd);
-                        }
-                        Err(e) => {
-                            info!("[ENDPOINT_DEBUG] Failed to get current directory: {}", e);
-                        }
-                    }
                     HashMap::new()
                 }
             }
         }
-        Err(e) => {
-            info!("[ENDPOINT_DEBUG] Failed to create HTTP client for endpoint checks: {}", e);
-            info!("[ENDPOINT_DEBUG] Client builder error details: {:?}", e);
+        Err(_) => {
             HashMap::new()
         }
     };
-    
-    info!("[ENDPOINT_DEBUG] Endpoint check completed. Status map size: {}", endpoints_status.len());
 
     // Always return 200 OK - endpoint status is informational
     Ok(Json(HealthCheckResponse {
