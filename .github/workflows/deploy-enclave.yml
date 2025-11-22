@@ -359,11 +359,11 @@ jobs:
           echo "🔍 Verifying port 3001 VSOCK listener..."
           if ! grep -q "VSOCK-LISTEN:3001" "$RUN_SH_PATH"; then
             echo "⚠️ Port 3001 VSOCK listener not found, adding it..."
-            # Add port 3001 listener after port 3000 listener
-            sed -i '/socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &/a\
-\
-# Listen on VSOCK Port 3001 and forward to localhost 3001\
-socat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &' "$RUN_SH_PATH"
+            # Add port 3001 listener after port 3000 listener using a temporary file
+            tmp_port3001=$(mktemp)
+            printf '\n# Listen on VSOCK Port 3001 and forward to localhost 3001\nsocat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &\n' > "$tmp_port3001"
+            sed -i '/socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &/ r '"$tmp_port3001" "$RUN_SH_PATH"
+            rm "$tmp_port3001"
             echo "✅ Added port 3001 VSOCK listener"
           else
             echo "✅ Port 3001 VSOCK listener already exists"
