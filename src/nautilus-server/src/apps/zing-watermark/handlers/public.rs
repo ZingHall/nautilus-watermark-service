@@ -15,9 +15,13 @@ use crate::{
     },
     zing_watermark::{
         get_file_key_for_wallet,
-        handlers::private::{
-            fetch_file_keys, DecryptFileKeysRequest, DecryptFileKeysResponse, FetchFileKeysRequest,
-            FetchFileKeysResponse, GetSealEncodedRequestsParams, GetSealEncodedRequestsResponse,
+        handlers::{
+            private::{
+                fetch_file_keys, DecryptFileKeysRequest, DecryptFileKeysResponse,
+                FetchFileKeysRequest, FetchFileKeysResponse, GetSealEncodedRequestsParams,
+                GetSealEncodedRequestsResponse,
+            },
+            verify::RequestIntent,
         },
         FILE_KEYS, SEAL_CONFIG, ZING_FILE_KEY_IV_12_BYTES,
     },
@@ -177,19 +181,9 @@ pub struct DecryptedContentResponse {
     pub wallet: String,
 }
 
-/// Inner type T for ProcessDataRequest<T>
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RequestIntentStruct {
-    pub wallet: String,
-    pub wallet_type: String,
-    pub content_id: String,
-    pub timestamp_ms: u64,
-    pub nonce: String,
-}
-
 pub async fn decrypt_files(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<ProcessDataRequest<RequestIntentStruct>>,
+    Json(request): Json<ProcessDataRequest<RequestIntent>>,
 ) -> Result<Json<ProcessedDataResponse<IntentMessage<DecryptedContentResponse>>>, EnclaveError> {
     // Validate timestamp (ensure request is recent, e.g., within 5 minutes)
     let current_timestamp = std::time::SystemTime::now()
