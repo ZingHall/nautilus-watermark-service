@@ -470,10 +470,36 @@ jobs:
               --honor-cooldown
             
             echo "Waiting for instances to be in service..."
-            # Wait for at least 1 instance to be in service (should be quick if already running)
-            aws autoscaling wait group-in-service \
-              --auto-scaling-group-names "$ASG_NAME" \
-              --max-records 2 || true
+            # Wait for instances to be in service using polling
+            MAX_WAIT=300  # 5 minutes max wait
+            ELAPSED=0
+            CHECK_INTERVAL=10  # Check every 10 seconds
+            
+            while [ $ELAPSED -lt $MAX_WAIT ]; do
+              IN_SERVICE_COUNT=$(aws autoscaling describe-auto-scaling-groups \
+                --auto-scaling-group-names "$ASG_NAME" \
+                --query "AutoScalingGroups[0].Instances[?LifecycleState=='InService'] | length(@)" \
+                --output text 2>/dev/null || echo "0")
+              
+              DESIRED_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
+                --auto-scaling-group-names "$ASG_NAME" \
+                --query 'AutoScalingGroups[0].DesiredCapacity' \
+                --output text 2>/dev/null || echo "0")
+              
+              echo "[$((ELAPSED/60))m ${ELAPSED}s] Instances in service: $IN_SERVICE_COUNT / $DESIRED_CAPACITY"
+              
+              if [ "$IN_SERVICE_COUNT" -ge "$DESIRED_CAPACITY" ] && [ "$IN_SERVICE_COUNT" -gt 0 ]; then
+                echo "✅ All instances are in service"
+                break
+              fi
+              
+              sleep $CHECK_INTERVAL
+              ELAPSED=$((ELAPSED + CHECK_INTERVAL))
+            done
+            
+            if [ $ELAPSED -ge $MAX_WAIT ]; then
+              echo "⚠️  Timeout waiting for instances to be in service, continuing anyway..."
+            fi
             
             # Give instances a bit more time to fully initialize
             echo "Waiting 60 seconds for instances to stabilize..."
