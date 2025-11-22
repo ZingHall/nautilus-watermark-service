@@ -201,10 +201,49 @@ jobs:
             echo "ℹ️ EIF file not found, will build new one"
           fi
 
+      - name: Verify allowed_endpoints.yaml configuration
+        if: steps.check-eif.outputs.exists == 'false'
+        run: |
+          ALLOWLIST_PATH="src/nautilus-server/src/apps/${{ env.ENCLAVE_APP }}/allowed_endpoints.yaml"
+          
+          echo "🔍 Verifying allowed_endpoints.yaml configuration..."
+          echo "Enclave App: ${{ env.ENCLAVE_APP }}"
+          echo "Expected path: $ALLOWLIST_PATH"
+          
+          if [ ! -f "$ALLOWLIST_PATH" ]; then
+            echo "❌ Error: allowed_endpoints.yaml not found at $ALLOWLIST_PATH"
+            echo "This file is required for the enclave to access external endpoints."
+            echo "Please create the file with the following structure:"
+            echo "---"
+            echo "endpoints:"
+            echo "  - https://example.com:443"
+            exit 1
+          fi
+          
+          echo "✅ allowed_endpoints.yaml found"
+          
+          # Display endpoints if yq is available, otherwise just show file exists
+          if command -v yq >/dev/null 2>&1; then
+            echo ""
+            echo "📋 Configured endpoints:"
+            yq e '.endpoints[]' "$ALLOWLIST_PATH" | sed 's/^/  - /' || echo "  (Unable to parse endpoints)"
+          else
+            echo "ℹ️ Install yq to display endpoint details: brew install yq"
+            echo "File content:"
+            cat "$ALLOWLIST_PATH"
+          fi
+          
+          echo ""
+          echo "✅ Endpoint configuration verified"
+
       - name: Build EIF file
         if: steps.check-eif.outputs.exists == 'false'
         run: |
           echo "🔨 Building EIF file..."
+          echo "Enclave App: ${{ env.ENCLAVE_APP }}"
+          echo "This build will include allowed_endpoints.yaml from src/nautilus-server/src/apps/${{ env.ENCLAVE_APP }}/"
+          echo ""
+          
           make ENCLAVE_APP=${{ env.ENCLAVE_APP }}
           
           if [ ! -f "out/nitro.eif" ]; then
@@ -214,6 +253,11 @@ jobs:
           
           echo "✅ EIF file built successfully"
           ls -lh out/nitro.eif
+          
+          # Verify that the build process completed (Containerfile should have copied allowed_endpoints.yaml)
+          echo ""
+          echo "ℹ️ Note: allowed_endpoints.yaml should be included in the EIF file"
+          echo "The file is copied during Docker build in the Containerfile"
 
       - name: Upload EIF to S3
         if: steps.check-eif.outputs.exists == 'false'
@@ -664,10 +708,23 @@ jobs:
           echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Environment:** ${{ steps.env.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Enclave App:** \`${{ env.ENCLAVE_APP }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**EIF Version:** \`${{ steps.shorten-commit.outputs.sha_short }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**S3 Path:** \`s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif\`" >> $GITHUB_STEP_SUMMARY
           echo "**Source Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Add endpoint configuration info if available
+          ALLOWLIST_PATH="src/nautilus-server/src/apps/${{ env.ENCLAVE_APP }}/allowed_endpoints.yaml"
+          if [ -f "$ALLOWLIST_PATH" ]; then
+            echo "**Allowed Endpoints:**" >> $GITHUB_STEP_SUMMARY
+            if command -v yq >/dev/null 2>&1; then
+              yq e '.endpoints[]' "$ALLOWLIST_PATH" | sed 's/^/  - /' >> $GITHUB_STEP_SUMMARY || echo "  (Unable to parse)" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "  (Configured in \`$ALLOWLIST_PATH\`)" >> $GITHUB_STEP_SUMMARY
+            fi
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
           
           if [ "${{ steps.check-eif.outputs.exists }}" == "true" ]; then
             echo "✅ EIF file already existed in S3, skipped build" >> $GITHUB_STEP_SUMMARY
