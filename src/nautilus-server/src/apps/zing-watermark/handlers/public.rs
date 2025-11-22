@@ -73,6 +73,29 @@ pub async fn list_file_keys(Query(pagination): Query<Pagination>) -> Json<FileKe
     })
 }
 
+// == TEST ==
+pub async fn test_fetch(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<FetchFileKeysRequest>,
+) -> Result<Json<RefreshResponse>, EnclaveError> {
+    let fetch_resp_json = fetch_file_keys(State(state.clone()), Json(request))
+        .await
+        .map_err(|e| EnclaveError::GenericError(format!("post_file_keys failed: {e:?}")))?;
+
+    // Extract the inner FetchFileKeysResponse (axum::Json<T> is a wrapper)
+    let fetch_resp: FetchFileKeysResponse = fetch_resp_json.0;
+    let studio_versions: Vec<u64> = fetch_resp
+        .initial_shared_versions
+        .iter()
+        .map(|(_, v)| *v)
+        .collect();
+
+    Ok(Json(RefreshResponse {
+        updated: studio_versions.len(),
+        total_wallets: studio_versions.len(),
+    }))
+}
+
 /// Response returned to the caller of the single-orchestrator endpoint.
 #[derive(Debug, Serialize)]
 pub struct RefreshResponse {

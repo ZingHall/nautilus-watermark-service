@@ -2,3 +2,4 @@
 # External endpoints that the enclave is allowed to access. 
 endpoints:
   - https://fullnode.testnet.sui.io:443  # mysten testnet url
+  - https://fullnode.testnet.sui.io  # mysten testnet url

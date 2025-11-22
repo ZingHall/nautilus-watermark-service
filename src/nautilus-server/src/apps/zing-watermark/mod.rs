@@ -2,7 +2,6 @@ pub mod handlers;
 pub mod models;
 pub mod types;
 
-use crate::zing_watermark::handlers::private::fetch_file_keys;
 use crate::zing_watermark::handlers::private::setup_enclave_object;
 use crate::AppState;
 use crate::EnclaveError;
@@ -69,7 +68,6 @@ pub async fn spawn_host_init_server(state: Arc<AppState>) -> Result<(), EnclaveE
     let host_app = Router::new()
         .route("/ping", get(ping))
         .route("/setup_enclave_object", post(setup_enclave_object))
-        .route("/seal/fetch_file_keys", post(fetch_file_keys))
         .route("/seal/encoded_requests", post(get_seal_encoded_requests))
         .route("/seal/decrypt_file_keys", post(decrypt_file_keys))
         .with_state(state);

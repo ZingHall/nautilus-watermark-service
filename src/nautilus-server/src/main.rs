@@ -3,7 +3,7 @@ use axum::{routing::get, routing::post, Router};
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
 use nautilus_server::common::{get_attestation, health_check};
 use nautilus_server::zing_watermark::handlers::public::{
-    decrypt_files, list_file_keys, post_file_keys,
+    decrypt_files, list_file_keys, post_file_keys, test_fetch,
 };
 use nautilus_server::AppState;
 use std::sync::Arc;
@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
         .route("/get_attestation", get(get_attestation))
         .route("/health_check", get(health_check))
         .route("/file_keys", get(list_file_keys))
+        .route("/test", get(test_fetch))
         // POST
         .route("/file_keys", post(post_file_keys))
         .route("/files/decrypt", post(decrypt_files))
