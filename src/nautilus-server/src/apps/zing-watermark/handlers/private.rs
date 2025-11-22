@@ -133,7 +133,7 @@ pub async fn fetch_file_keys(
                 .with_read_mask(FieldMask::from_paths(vec!["bcs", "owner"])),
         )
         .await
-        .map_err(|e| EnclaveError::GenericError(format!("batch_get_objects_error: {e}")))?
+        .map_err(|e| EnclaveError::GenericError(format!("batch_get_file_keys_error: {e}")))?
         .into_inner();
 
     let mut successes = Vec::new();

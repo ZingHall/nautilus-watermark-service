@@ -87,7 +87,7 @@ pub async fn post_file_keys(
     json: Json<FetchFileKeysRequest>,
 ) -> Result<Json<RefreshResponse>, EnclaveError> {
     let host_url =
-        std::env::var("HOST_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+        std::env::var("HOST_BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
     post_file_keys_(state, json, &host_url).await
 }
 
@@ -100,7 +100,7 @@ pub async fn post_file_keys_(
 ) -> Result<Json<RefreshResponse>, EnclaveError> {
     let fetch_resp_json = fetch_file_keys(State(state.clone()), Json(request))
         .await
-        .map_err(|e| EnclaveError::GenericError(format!("fetch_file_keys failed: {e:?}")))?;
+        .map_err(|e| EnclaveError::GenericError(format!("post_file_keys failed: {e:?}")))?;
 
     // Extract the inner FetchFileKeysResponse (axum::Json<T> is a wrapper)
     let fetch_resp: FetchFileKeysResponse = fetch_resp_json.0;
