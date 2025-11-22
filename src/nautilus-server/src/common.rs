@@ -201,9 +201,10 @@ pub async fn health_check(
                                     if let Some(endpoint_str) = endpoint.as_str() {
                                         info!("[ENDPOINT_DEBUG] [{}/{}] Checking endpoint: {}", idx + 1, endpoints.len(), endpoint_str);
                                         
-                                        // Try to resolve DNS first
+                                        // Extract hostname (remove port number if present)
+                                        // e.g., "fullnode.testnet.sui.io:443" -> "fullnode.testnet.sui.io"
                                         let hostname = endpoint_str.split(':').next().unwrap_or(endpoint_str);
-                                        info!("[ENDPOINT_DEBUG] Attempting DNS resolution for: {}", hostname);
+                                        info!("[ENDPOINT_DEBUG] Extracted hostname: {} (from endpoint: {})", hostname, endpoint_str);
                                         
                                         // Check /etc/hosts first
                                         match std::fs::read_to_string("/etc/hosts") {
@@ -220,12 +221,14 @@ pub async fn health_check(
                                             }
                                         }
                                         
-                                        let url = if endpoint_str.contains(".amazonaws.com") {
-                                            format!("https://{endpoint_str}/ping")
-                                        } else if endpoint_str.contains("sui.io") {
-                                            format!("https://{endpoint_str}/health")
+                                        // Construct URL using hostname (not endpoint_str) to avoid port duplication
+                                        // HTTPS uses port 443 by default, so we don't need to include it in the URL
+                                        let url = if hostname.contains(".amazonaws.com") {
+                                            format!("https://{}/ping", hostname)
+                                        } else if hostname.contains("sui.io") {
+                                            format!("https://{}/health", hostname)
                                         } else {
-                                            format!("https://{endpoint_str}")
+                                            format!("https://{}", hostname)
                                         };
                                         
                                         info!("[ENDPOINT_DEBUG] Constructed URL: {}", url);

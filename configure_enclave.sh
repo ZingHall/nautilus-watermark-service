@@ -405,7 +405,11 @@ fi
 ip=64
 endpoints_config=""
 for ep in $ENDPOINTS; do
-    endpoints_config="${endpoints_config}echo \"127.0.0.${ip}   ${ep}\" >> /etc/hosts"$'\n'
+    # Extract hostname by removing port number (e.g., "host:443" -> "host")
+    # /etc/hosts format: IP_ADDRESS   HOSTNAME (no port numbers allowed)
+    hostname=$(echo "$ep" | sed 's/:.*$//')
+    echo "  Processing endpoint: $ep -> hostname: $hostname"
+    endpoints_config="${endpoints_config}echo \"127.0.0.${ip}   ${hostname}\" >> /etc/hosts"$'\n'
     ip=$((ip+1))
 done
 

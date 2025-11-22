@@ -273,28 +273,61 @@ jobs:
           fi
           
           # Build endpoints configuration (matching configure_enclave.sh behavior)
+          # IMPORTANT: Extract hostname from endpoint (remove port numbers)
+          # /etc/hosts format: IP_ADDRESS   HOSTNAME (no port numbers allowed)
           ip=64
-          endpoints_config=""
+          tmp_endpoints_config=$(mktemp)
           for ep in $ENDPOINTS; do
-            # Use the full endpoint as-is (configure_enclave.sh does the same)
-            endpoints_config="${endpoints_config}echo \"127.0.0.${ip}   ${ep}\" >> /etc/hosts"$'\n'
+            # Extract hostname by removing port number (e.g., "host:443" -> "host")
+            hostname=$(echo "$ep" | sed 's/:.*$//')
+            echo "  Processing endpoint: $ep -> hostname: $hostname"
+            echo "echo \"127.0.0.${ip}   ${hostname}\" >> /etc/hosts" >> "$tmp_endpoints_config"
             ip=$((ip+1))
           done
+          
+          echo ""
+          echo "📋 Generated /etc/hosts configuration:"
+          cat "$tmp_endpoints_config"
           
           echo ""
           echo "📝 Updating /etc/hosts configuration in run.sh..."
           
           # Remove any existing endpoint lines (except the first localhost line)
+          # This removes lines like: echo "127.0.0.64   hostname" >> /etc/hosts
           sed -i '/echo "127.0.0.[0-9]*   .*" >> \/etc\/hosts/d' "$RUN_SH_PATH"
+          
+          # Ensure the localhost line exists
           if ! grep -q 'echo "127.0.0.1   localhost" > /etc/hosts' "$RUN_SH_PATH"; then
             sed -i '/# Add a hosts record/a\echo "127.0.0.1   localhost" > /etc/hosts' "$RUN_SH_PATH"
           fi
           
-          # Add the new endpoint configuration
-          tmp_hosts=$(mktemp)
-          echo "$endpoints_config" > "$tmp_hosts"
-          sed -i "/echo \"127.0.0.1   localhost\" > \/etc\/hosts/ r $tmp_hosts" "$RUN_SH_PATH"
-          rm "$tmp_hosts"
+          # Add the new endpoint configuration after the localhost line
+          # Use the temporary file we created above
+          if [ -s "$tmp_endpoints_config" ]; then
+            # Find the line number of the localhost line
+            localhost_line=$(grep -n 'echo "127.0.0.1   localhost" > /etc/hosts' "$RUN_SH_PATH" | cut -d: -f1 | head -1)
+            
+            if [ -z "$localhost_line" ]; then
+              echo "❌ ERROR: Could not find localhost line in run.sh"
+              echo "   File content around expected location:"
+              grep -A 5 -B 5 "localhost" "$RUN_SH_PATH" | head -15
+              rm "$tmp_endpoints_config"
+              exit 1
+            fi
+            
+            echo "   Found localhost line at line $localhost_line"
+            
+            # Insert endpoint configuration after the localhost line using sed
+            # The 'r' command reads the file and inserts it after the matching line
+            sed -i "${localhost_line}r $tmp_endpoints_config" "$RUN_SH_PATH"
+            
+            echo "✅ Inserted endpoint configuration after line $localhost_line"
+          else
+            echo "⚠️  WARNING: No endpoint configuration to insert (file is empty)"
+          fi
+          
+          # Clean up temporary file
+          rm -f "$tmp_endpoints_config"
           
           echo "✅ Updated /etc/hosts configuration"
           
@@ -379,6 +412,18 @@ jobs:
           echo ""
           echo "--- VSOCK listeners section ---"
           grep -A 2 'VSOCK-LISTEN:300' "$RUN_SH_PATH"
+          
+          # Verify that endpoints were actually added
+          echo ""
+          echo "🔍 Verifying endpoint configuration was added..."
+          HOSTS_LINES=$(grep -c 'echo "127.0.0.[0-9]*   .*" >> /etc/hosts' "$RUN_SH_PATH" || echo "0")
+          if [ "$HOSTS_LINES" -eq 0 ]; then
+            echo "❌ ERROR: No endpoint configuration found in run.sh!"
+            echo "   This means endpoints were not added. Check the sed command above."
+            exit 1
+          else
+            echo "✅ Found $HOSTS_LINES endpoint configuration line(s) in run.sh"
+          fi
 
       - name: Build EIF file
         if: steps.check-eif.outputs.exists == 'false'

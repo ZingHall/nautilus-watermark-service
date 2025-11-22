@@ -1,6 +1,7 @@
 ---
 # External endpoints that the enclave is allowed to access. 
+# Note: Do not include port numbers (e.g., :443) as HTTPS uses port 443 by default
+# The URL construction code will handle port numbers automatically
 endpoints:
-  - fullnode.testnet.sui.io  # mysten testnet url
-  - fullnode.testnet.sui.io:443  # mysten testnet url
+  - fullnode.testnet.sui.io  # mysten testnet url (HTTPS uses port 443 by default)
   - api.weatherapi.com

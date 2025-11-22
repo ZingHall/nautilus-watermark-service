@@ -11,9 +11,24 @@ use sui_rpc::Client;
 use tokio::sync::Mutex;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
+use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing subscriber to enable logging
+    // This will output logs to stderr, which should be visible in enclave console
+    // Logs will appear when using --attach-console or can be captured by system logs
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr) // Use stderr for better visibility
+        .with_ansi(false) // Disable ANSI colors for better log file compatibility
+        .init();
+    
+    info!("[APP_INIT] Starting nautilus-server application");
+    
     let eph_kp = Ed25519KeyPair::generate(&mut rand::thread_rng());
     let sui_client = Arc::new(Mutex::new(Client::new(Client::TESTNET_FULLNODE)?));
     let state = Arc::new(AppState { eph_kp, sui_client });
