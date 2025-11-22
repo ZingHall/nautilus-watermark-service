@@ -167,9 +167,11 @@ pub async fn health_check(
                                 for endpoint in endpoints {
                                     if let Some(endpoint_str) = endpoint.as_str() {
                                         let url = if endpoint_str.contains(".amazonaws.com") {
-                                            format!("https://{}/ping", endpoint_str)
+                                            format!("https://{endpoint_str}/ping")
+                                        } else if endpoint_str.contains("sui.io") {
+                                            format!("https://{endpoint_str}/health")
                                         } else {
-                                            format!("https://{}", endpoint_str)
+                                            format!("https://{endpoint_str}")
                                         };
 
                                         let is_reachable = match client.get(&url).send().await {
@@ -194,7 +196,10 @@ pub async fn health_check(
                                                 }
                                             }
                                             Err(e) => {
-                                                info!("Failed to connect to {}: {}", endpoint_str, e);
+                                                info!(
+                                                    "Failed to connect to {}: {}",
+                                                    endpoint_str, e
+                                                );
                                                 false
                                             }
                                         };
