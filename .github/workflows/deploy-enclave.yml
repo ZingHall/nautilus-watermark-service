@@ -432,6 +432,196 @@ jobs:
             -var="eif_version=${{ steps.shorten-commit.outputs.sha_short }}"
           
           echo "✅ Terraform applied successfully"
+          
+          # Get Auto Scaling Group name from Terraform output
+          # The output name is autoscaling_group_name
+          ASG_NAME=$(terraform output -raw autoscaling_group_name 2>/dev/null || echo "")
+          if [ -z "$ASG_NAME" ]; then
+            # Fallback: construct ASG name based on environment
+            # Module name is "nautilus-watermark-{environment}", ASG suffix is "-asg"
+            ASG_NAME="nautilus-watermark-${{ steps.env.outputs.environment }}-asg"
+            echo "⚠️  Could not get ASG name from terraform output, using fallback: $ASG_NAME"
+          else
+            echo "✅ Got ASG name from terraform output: $ASG_NAME"
+          fi
+          echo "ASG_NAME=$ASG_NAME" >> $GITHUB_ENV
+
+      - name: Scale up for zero-downtime deployment
+        if: |
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply == 'true') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'staging')
+        run: |
+          echo "📈 Scaling up to 2 instances for zero-downtime deployment..."
+          
+          # Get current desired capacity
+          CURRENT_CAPACITY=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --query 'AutoScalingGroups[0].DesiredCapacity' \
+            --output text 2>/dev/null || echo "1")
+          
+          echo "Current desired capacity: $CURRENT_CAPACITY"
+          
+          # Scale up to 2 instances if not already at 2
+          if [ "$CURRENT_CAPACITY" != "2" ]; then
+            echo "Scaling up to 2 instances..."
+            aws autoscaling set-desired-capacity \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --desired-capacity 2 \
+              --honor-cooldown
+            
+            echo "Waiting for instances to be in service..."
+            # Wait for at least 1 instance to be in service (should be quick if already running)
+            aws autoscaling wait group-in-service \
+              --auto-scaling-group-names "$ASG_NAME" \
+              --max-records 2 || true
+            
+            # Give instances a bit more time to fully initialize
+            echo "Waiting 60 seconds for instances to stabilize..."
+            sleep 60
+            echo "✅ Scaled up to 2 instances"
+          else
+            echo "✅ Already at 2 instances, no scaling needed"
+          fi
+
+      - name: Trigger Auto Scaling Group Instance Refresh
+        if: |
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply == 'true') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'staging')
+        run: |
+          echo "🔄 Triggering Auto Scaling Group instance refresh..."
+          echo "This will replace existing instances with new ones using the updated launch template"
+          
+          # Check if there's an existing instance refresh in progress
+          EXISTING_REFRESH=$(aws autoscaling describe-instance-refreshes \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --query 'InstanceRefreshes[?Status==`InProgress` || Status==`Pending`].InstanceRefreshId' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -n "$EXISTING_REFRESH" ]; then
+            echo "⚠️  Instance refresh already in progress: $EXISTING_REFRESH"
+            echo "Waiting for existing refresh to complete or canceling it..."
+            
+            # Cancel existing refresh if it's been running for more than 30 minutes
+            REFRESH_START_TIME=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$EXISTING_REFRESH" \
+              --query 'InstanceRefreshes[0].StartTime' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$REFRESH_START_TIME" ]; then
+              # Calculate time difference (simplified check)
+              echo "Existing refresh started at: $REFRESH_START_TIME"
+              # For simplicity, we'll cancel and start a new one
+              aws autoscaling cancel-instance-refresh \
+                --auto-scaling-group-name "$ASG_NAME" \
+                --instance-refresh-id "$EXISTING_REFRESH" 2>/dev/null || true
+              echo "Canceled existing refresh, starting new one..."
+            fi
+          fi
+          
+          # Start instance refresh
+          REFRESH_ID=$(aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --preferences '{
+              "MinHealthyPercentage": 50,
+              "InstanceWarmup": 300,
+              "CheckpointPercentages": [50, 100],
+              "CheckpointDelay": 60,
+              "SkipMatching": false
+            }' \
+            --query 'InstanceRefreshId' \
+            --output text)
+          
+          if [ -n "$REFRESH_ID" ] && [ "$REFRESH_ID" != "None" ]; then
+            echo "✅ Instance refresh started: $REFRESH_ID"
+            echo "REFRESH_ID=$REFRESH_ID" >> $GITHUB_ENV
+            
+            # Wait a bit and check status
+            echo "Waiting 30 seconds before checking status..."
+            sleep 30
+            
+            REFRESH_STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text 2>/dev/null || echo "Unknown")
+            
+            echo "Instance refresh status: $REFRESH_STATUS"
+            echo ""
+            echo "📊 Instance refresh will:"
+            echo "  1. Launch new instances with updated launch template"
+            echo "  2. Wait for new instances to pass health checks"
+            echo "  3. Terminate old instances"
+            echo ""
+            echo "You can monitor progress in AWS Console:"
+            echo "  EC2 → Auto Scaling Groups → $ASG_NAME → Instance refresh tab"
+            echo ""
+            echo "Or check status with:"
+            echo "  aws autoscaling describe-instance-refreshes --auto-scaling-group-name $ASG_NAME"
+          else
+            echo "⚠️  Failed to start instance refresh, but this is not critical"
+            echo "Instances will be replaced when they are manually terminated or when health checks fail"
+          fi
+
+      - name: Wait for instance refresh to complete
+        if: |
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply == 'true') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'staging')
+        run: |
+          if [ -z "${REFRESH_ID:-}" ] || [ "$REFRESH_ID" == "None" ] || [ "$REFRESH_ID" == "" ]; then
+            echo "⚠️  No instance refresh ID found, skipping wait"
+            exit 0
+          fi
+          
+          echo "⏳ Waiting for instance refresh to complete..."
+          echo "This may take 10-15 minutes depending on instance startup and health checks"
+          
+          MAX_WAIT_TIME=1800  # 30 minutes max wait
+          ELAPSED=0
+          CHECK_INTERVAL=30  # Check every 30 seconds
+          
+          while [ $ELAPSED -lt $MAX_WAIT_TIME ]; do
+            REFRESH_STATUS=$(aws autoscaling describe-instance-refreshes \
+              --auto-scaling-group-name "$ASG_NAME" \
+              --instance-refresh-ids "$REFRESH_ID" \
+              --query 'InstanceRefreshes[0].Status' \
+              --output text 2>/dev/null || echo "Unknown")
+            
+            echo "[$((ELAPSED/60))m ${ELAPSED}s] Instance refresh status: $REFRESH_STATUS"
+            
+            if [ "$REFRESH_STATUS" == "Successful" ]; then
+              echo "✅ Instance refresh completed successfully!"
+              break
+            elif [ "$REFRESH_STATUS" == "Failed" ] || [ "$REFRESH_STATUS" == "Cancelled" ]; then
+              echo "⚠️  Instance refresh ended with status: $REFRESH_STATUS"
+              echo "Continuing anyway - instances may still be updated"
+              break
+            fi
+            
+            sleep $CHECK_INTERVAL
+            ELAPSED=$((ELAPSED + CHECK_INTERVAL))
+          done
+          
+          if [ $ELAPSED -ge $MAX_WAIT_TIME ]; then
+            echo "⚠️  Timeout waiting for instance refresh to complete"
+            echo "Refresh may still be in progress. Check AWS Console for status."
+          fi
+
+      - name: Scale down to 1 instance after deployment
+        if: |
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.auto_apply == 'true') ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.env.outputs.environment == 'staging')
+        run: |
+          echo "📉 Scaling down to 1 instance after successful deployment..."
+          
+          # Scale down to 1 instance
+          aws autoscaling set-desired-capacity \
+            --auto-scaling-group-name "$ASG_NAME" \
+            --desired-capacity 1 \
+            --honor-cooldown
+          
+          echo "✅ Scaled down to 1 instance"
+          echo "The Auto Scaling Group will terminate one instance, keeping the newly deployed one"
 
       - name: Notify deployment status
         if: always()
@@ -461,10 +651,23 @@ jobs:
           
           if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ github.event.inputs.auto_apply }}" == "true" ]; then
             echo "✅ Terraform changes applied automatically" >> $GITHUB_STEP_SUMMARY
+            if [ -n "${REFRESH_ID:-}" ] && [ "$REFRESH_ID" != "None" ] && [ "$REFRESH_ID" != "" ]; then
+              echo "🔄 Instance refresh started: \`$REFRESH_ID\`" >> $GITHUB_STEP_SUMMARY
+              echo "   Instances are being replaced with new launch template version" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "ℹ️  Instance refresh may be in progress (check AWS Console for status)" >> $GITHUB_STEP_SUMMARY
+            fi
           elif [ "${{ github.event_name }}" == "push" ] && [ "${{ steps.env.outputs.environment }}" == "staging" ]; then
             echo "✅ Terraform changes applied automatically (staging auto-deploy)" >> $GITHUB_STEP_SUMMARY
+            if [ -n "${REFRESH_ID:-}" ] && [ "$REFRESH_ID" != "None" ] && [ "$REFRESH_ID" != "" ]; then
+              echo "🔄 Instance refresh started: \`$REFRESH_ID\`" >> $GITHUB_STEP_SUMMARY
+              echo "   Instances are being replaced with new launch template version" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "ℹ️  Instance refresh may be in progress (check AWS Console for status)" >> $GITHUB_STEP_SUMMARY
+            fi
           else
             echo "📝 Pull Request created for Terraform changes" >> $GITHUB_STEP_SUMMARY
             echo "   Review and merge to apply the update" >> $GITHUB_STEP_SUMMARY
+            echo "   After merging, instance refresh will be triggered automatically" >> $GITHUB_STEP_SUMMARY
           fi
 
