@@ -236,6 +236,150 @@ jobs:
           echo ""
           echo "✅ Endpoint configuration verified"
 
+      - name: Install yq
+        if: steps.check-eif.outputs.exists == 'false'
+        uses: mikefarah/yq@v4.40.5
+        with:
+          version: '4.40.5'
+
+      - name: Update run.sh with endpoint configuration
+        if: steps.check-eif.outputs.exists == 'false'
+        run: |
+          echo "🔧 Updating run.sh with endpoint configuration from allowed_endpoints.yaml..."
+          ALLOWLIST_PATH="src/nautilus-server/src/apps/${{ env.ENCLAVE_APP }}/allowed_endpoints.yaml"
+          RUN_SH_PATH="src/nautilus-server/run.sh"
+          AWS_REGION="${{ env.AWS_REGION }}"
+          
+          # Read endpoints from allowed_endpoints.yaml
+          ENDPOINTS=$(yq e '.endpoints | join(" ")' "$ALLOWLIST_PATH" 2>/dev/null || echo "")
+          
+          if [ -z "$ENDPOINTS" ]; then
+            echo "⚠️ No endpoints found in $ALLOWLIST_PATH, skipping run.sh update"
+            exit 0
+          fi
+          
+          echo "📋 Found endpoints (before region patching):"
+          echo "$ENDPOINTS" | tr ' ' '\n' | sed 's/^/  - /'
+          
+          # Apply region patching for AWS services (matching configure_enclave.sh behavior)
+          # Replace any existing region in kms.* / secretsmanager.* with the configured AWS_REGION
+          if [ -n "$ENDPOINTS" ]; then
+            ENDPOINTS=$(echo "$ENDPOINTS" \
+              | sed "s|kms\.[^.]*\.amazonaws\.com|kms.$AWS_REGION.amazonaws.com|g" \
+              | sed "s|secretsmanager\.[^.]*\.amazonaws\.com|secretsmanager.$AWS_REGION.amazonaws.com|g")
+            echo ""
+            echo "📋 Endpoints after region patching:"
+            echo "$ENDPOINTS" | tr ' ' '\n' | sed 's/^/  - /'
+          fi
+          
+          # Build endpoints configuration (matching configure_enclave.sh behavior)
+          ip=64
+          endpoints_config=""
+          for ep in $ENDPOINTS; do
+            # Use the full endpoint as-is (configure_enclave.sh does the same)
+            endpoints_config="${endpoints_config}echo \"127.0.0.${ip}   ${ep}\" >> /etc/hosts"$'\n'
+            ip=$((ip+1))
+          done
+          
+          echo ""
+          echo "📝 Updating /etc/hosts configuration in run.sh..."
+          
+          # Remove any existing endpoint lines (except the first localhost line)
+          sed -i '/echo "127.0.0.[0-9]*   .*" >> \/etc\/hosts/d' "$RUN_SH_PATH"
+          if ! grep -q 'echo "127.0.0.1   localhost" > /etc/hosts' "$RUN_SH_PATH"; then
+            sed -i '/# Add a hosts record/a\echo "127.0.0.1   localhost" > /etc/hosts' "$RUN_SH_PATH"
+          fi
+          
+          # Add the new endpoint configuration
+          tmp_hosts=$(mktemp)
+          echo "$endpoints_config" > "$tmp_hosts"
+          sed -i "/echo \"127.0.0.1   localhost\" > \/etc\/hosts/ r $tmp_hosts" "$RUN_SH_PATH"
+          rm "$tmp_hosts"
+          
+          echo "✅ Updated /etc/hosts configuration"
+          
+          # Update traffic forwarder configuration
+          # Traffic forwarder bridges TCP/IP (127.0.0.x:443) to VSOCK (CID 3:810x)
+          # Each endpoint gets:
+          #   - A unique 127.0.0.x IP (mapped in /etc/hosts)
+          #   - A unique VSOCK port (8101, 8102, ...)
+          # The vsock-proxy on the EC2 host forwards VSOCK traffic to the actual endpoint
+          echo ""
+          echo "📝 Updating traffic forwarder configuration in run.sh..."
+          
+          ip_forwarder=64
+          port_forwarder=8101
+          traffic_config=""
+          endpoint_count=0
+          for ep in $ENDPOINTS; do
+            traffic_config="${traffic_config}python3 /traffic_forwarder.py 127.0.0.${ip_forwarder} 443 3 ${port_forwarder} &"$'\n'
+            echo "  Endpoint $((endpoint_count+1)): $ep → 127.0.0.${ip_forwarder}:443 → VSOCK CID 3:${port_forwarder}"
+            ip_forwarder=$((ip_forwarder+1))
+            port_forwarder=$((port_forwarder+1))
+            endpoint_count=$((endpoint_count+1))
+          done
+          
+          if [ $endpoint_count -eq 0 ]; then
+            echo "⚠️ No endpoints to configure traffic forwarders for"
+          else
+            echo "  Configured $endpoint_count traffic forwarder(s)"
+          fi
+          
+          # Remove any existing traffic forwarder lines
+          sed -i '/python3 \/traffic_forwarder.py/d' "$RUN_SH_PATH"
+          
+          # Add the new traffic forwarder configuration
+          tmp_traffic=$(mktemp)
+          echo "$traffic_config" > "$tmp_traffic"
+          sed -i "/# Traffic-forwarder-block/ r $tmp_traffic" "$RUN_SH_PATH"
+          rm "$tmp_traffic"
+          
+          echo "✅ Updated traffic forwarder configuration"
+          
+          # Verify consistency between /etc/hosts and traffic forwarder configurations
+          echo ""
+          echo "🔍 Verifying configuration consistency..."
+          HOSTS_COUNT=$(grep -c 'echo "127.0.0.[0-9]*' "$RUN_SH_PATH" || echo "0")
+          FORWARDER_COUNT=$(grep -c 'traffic_forwarder.py' "$RUN_SH_PATH" || echo "0")
+          
+          # Subtract 1 from HOSTS_COUNT because it includes the localhost line
+          if [ "$HOSTS_COUNT" -gt 0 ]; then
+            HOSTS_COUNT=$((HOSTS_COUNT - 1))
+          fi
+          
+          if [ "$HOSTS_COUNT" -eq "$FORWARDER_COUNT" ]; then
+            echo "✅ Configuration consistent: $HOSTS_COUNT endpoint(s) in /etc/hosts, $FORWARDER_COUNT traffic forwarder(s)"
+          else
+            echo "⚠️ Configuration mismatch: $HOSTS_COUNT endpoint(s) in /etc/hosts, $FORWARDER_COUNT traffic forwarder(s)"
+            echo "   This may indicate a configuration issue"
+          fi
+          
+          # Verify port 3001 VSOCK listener exists (required by configure_enclave.sh)
+          echo ""
+          echo "🔍 Verifying port 3001 VSOCK listener..."
+          if ! grep -q "VSOCK-LISTEN:3001" "$RUN_SH_PATH"; then
+            echo "⚠️ Port 3001 VSOCK listener not found, adding it..."
+            # Add port 3001 listener after port 3000 listener
+            sed -i '/socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &/a\
+\
+# Listen on VSOCK Port 3001 and forward to localhost 3001\
+socat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &' "$RUN_SH_PATH"
+            echo "✅ Added port 3001 VSOCK listener"
+          else
+            echo "✅ Port 3001 VSOCK listener already exists"
+          fi
+          
+          echo ""
+          echo "📄 Updated run.sh content:"
+          echo "--- /etc/hosts section ---"
+          grep -A 10 'echo "127.0.0.1   localhost"' "$RUN_SH_PATH" | head -15
+          echo ""
+          echo "--- Traffic forwarder section ---"
+          grep -A 5 '# Traffic-forwarder-block' "$RUN_SH_PATH" | head -10
+          echo ""
+          echo "--- VSOCK listeners section ---"
+          grep -A 2 'VSOCK-LISTEN:300' "$RUN_SH_PATH"
+
       - name: Build EIF file
         if: steps.check-eif.outputs.exists == 'false'
         run: |
