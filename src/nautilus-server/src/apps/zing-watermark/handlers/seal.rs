@@ -127,59 +127,150 @@ pub async fn fetch_seal_keys(
     key_server_ids: &[Address],
     request: String,
 ) -> Result<Vec<(Address, FetchKeyResponse)>, FastCryptoError> {
+    use tracing::info;
+    
+    info!("[SEAL_DEBUG] Starting fetch_seal_keys with {} key server IDs", key_server_ids.len());
+    
     let bytes = PrefixedHex::decode(&request).map(EncodedBytes)?;
     let threshold = 2;
     let request: FetchKeyRequest = bcs::from_bytes(&bytes.0).map_err(|e| {
+        info!("[SEAL_DEBUG] Failed to parse FetchKeyRequest from BCS: {}", e);
         FastCryptoError::GeneralError(format!("Failed to parse FetchKeyRequest from BCS: {e}"))
     })?;
+    
+    info!("[SEAL_DEBUG] Successfully parsed FetchKeyRequest");
 
     // Fetch keys from key server urls and collect service id and its seal responses.
     let mut seal_responses = Vec::new();
-    let client = reqwest::Client::new();
-    for server in &fetch_key_server_urls(sui_client, key_server_ids)
+    
+    info!("[SEAL_DEBUG] Creating reqwest client");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| {
+            info!("[SEAL_DEBUG] Failed to create reqwest client: {}", e);
+            FastCryptoError::GeneralError(format!("Failed to create HTTP client: {e}"))
+        })?;
+    info!("[SEAL_DEBUG] Reqwest client created successfully");
+    
+    info!("[SEAL_DEBUG] Fetching key server URLs from Sui blockchain");
+    let key_servers = fetch_key_server_urls(sui_client, key_server_ids)
         .await
         .map_err(|e| {
+            info!("[SEAL_DEBUG] Failed to fetch key server URLs: {}", e);
             FastCryptoError::GeneralError(format!("Failed to fetch key server URLs: {e}"))
-        })?
-    {
+        })?;
+    
+    info!("[SEAL_DEBUG] Retrieved {} key servers", key_servers.len());
+    for (idx, server) in key_servers.iter().enumerate() {
+        info!("[SEAL_DEBUG] Key server {}: name={}, url={}, object_id={}", 
+              idx + 1, server.name, server.url, server.object_id);
+    }
+    
+    // Check /etc/hosts for DNS resolution
+    match std::fs::read_to_string("/etc/hosts") {
+        Ok(hosts_content) => {
+            info!("[SEAL_DEBUG] /etc/hosts content:\n{}", hosts_content);
+        }
+        Err(e) => {
+            info!("[SEAL_DEBUG] Failed to read /etc/hosts: {}", e);
+        }
+    }
+    
+    for (idx, server) in key_servers.iter().enumerate() {
+        let url = format!("{}/v1/fetch_key", server.url);
+        info!("[SEAL_DEBUG] [{}/{}] Attempting to fetch key from server: {}", 
+              idx + 1, key_servers.len(), server.name);
+        info!("[SEAL_DEBUG] Full URL: {}", url);
+        
+        // Extract hostname from URL for DNS check
+        if let Some(hostname) = url.strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .and_then(|s| s.split('/').next())
+        {
+            info!("[SEAL_DEBUG] Extracted hostname: {}", hostname);
+        }
+        
+        let request_body = request.to_json_string().expect("should not fail");
+        info!("[SEAL_DEBUG] Request body length: {} bytes", request_body.len());
+        
         match client
-            .post(format!("{}/v1/fetch_key", server.url))
+            .post(&url)
             .header("Client-Sdk-Type", "rust")
             .header("Client-Sdk-Version", "1.0.0")
             .header("Content-Type", "application/json")
-            .body(Body::from(
-                request.to_json_string().expect("should not fail"),
-            ))
+            .body(Body::from(request_body))
             .send()
             .await
         {
             Ok(response) => {
-                if response.status().is_success() {
-                    let response_bytes = response.bytes().await.expect("should not fail");
-                    let response: FetchKeyResponse = serde_json::from_slice(&response_bytes)
-                        .expect("Failed to deserialize response");
-                    seal_responses.push((server.object_id, response));
-                    println!("\n Success {}", server.name);
+                let status = response.status();
+                info!("[SEAL_DEBUG] Received response from {}: status = {}", server.name, status);
+                
+                if status.is_success() {
+                    info!("[SEAL_DEBUG] Response is successful, reading response body");
+                    match response.bytes().await {
+                        Ok(response_bytes) => {
+                            info!("[SEAL_DEBUG] Response body length: {} bytes", response_bytes.len());
+                            match serde_json::from_slice::<FetchKeyResponse>(&response_bytes) {
+                                Ok(parsed_response) => {
+                                    info!("[SEAL_DEBUG] Successfully parsed FetchKeyResponse from {}", server.name);
+                                    seal_responses.push((server.object_id, parsed_response));
+                                    info!("[SEAL_DEBUG] Successfully added response from {}", server.name);
+                                }
+                                Err(e) => {
+                                    info!("[SEAL_DEBUG] Failed to deserialize response from {}: {}", server.name, e);
+                                    eprintln!("Failed to deserialize response from {}: {}", server.name, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            info!("[SEAL_DEBUG] Failed to read response bytes from {}: {}", server.name, e);
+                            eprintln!("Failed to read response bytes from {}: {}", server.name, e);
+                        }
+                    }
                 } else {
-                    let error_text = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "Unknown error".to_string());
-                    eprintln!("Server returned error: {error_text}");
+                    info!("[SEAL_DEBUG] Response status is not success: {}", status);
+                    match response.text().await {
+                        Ok(error_text) => {
+                            info!("[SEAL_DEBUG] Error response body: {}", error_text);
+                            eprintln!("Server {} returned error status {}: {}", server.name, status, error_text);
+                        }
+                        Err(e) => {
+                            info!("[SEAL_DEBUG] Failed to read error response body: {}", e);
+                            eprintln!("Server {} returned error status {} (failed to read body: {})", server.name, status, e);
+                        }
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Failed: {e}");
+                info!("[SEAL_DEBUG] Failed to send request to {}: {}", server.name, e);
+                info!("[SEAL_DEBUG] Error details: {:?}", e);
+                
+                // Provide more specific error information
+                if e.is_timeout() {
+                    info!("[SEAL_DEBUG] Error type: TIMEOUT");
+                } else if e.is_connect() {
+                    info!("[SEAL_DEBUG] Error type: CONNECTION (DNS resolution or network issue)");
+                } else if e.is_request() {
+                    info!("[SEAL_DEBUG] Error type: REQUEST");
+                }
+                
+                eprintln!("Failed to connect to {}: {}", server.name, e);
             }
         }
 
+        info!("[SEAL_DEBUG] Current successful responses: {}/{}", seal_responses.len(), threshold);
         if seal_responses.len() >= threshold as usize {
+            info!("[SEAL_DEBUG] Reached threshold of {} responses, stopping", threshold);
             println!("Reached threshold of {threshold} responses");
             break;
         }
     }
 
+    info!("[SEAL_DEBUG] Final result: {} successful responses out of {} required", seal_responses.len(), threshold);
     if seal_responses.len() < threshold as usize {
+        info!("[SEAL_DEBUG] ERROR: Not enough responses: {} < {}", seal_responses.len(), threshold);
         return Err(FastCryptoError::GeneralError(format!(
             "Failed to get enough responses: {} < {}",
             seal_responses.len(),
@@ -187,6 +278,7 @@ pub async fn fetch_seal_keys(
         )));
     }
 
+    info!("[SEAL_DEBUG] Successfully fetched {} seal key responses", seal_responses.len());
     Ok(seal_responses)
 }
 
