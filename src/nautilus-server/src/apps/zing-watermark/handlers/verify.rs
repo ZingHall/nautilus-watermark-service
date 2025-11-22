@@ -4,7 +4,7 @@ use sui_rpc::{proto::sui::rpc::v2::VerifySignatureRequest, Client};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct RequestIntent {
-    pub wallet: String,
+    pub owner_address: String, // content owner address
     pub content_id: String,
     pub timestamp_ms: u64,
     pub nonce: String,
@@ -76,7 +76,8 @@ mod tests {
     #[tokio::test]
     async fn test_verify_signature() {
         let intent = RequestIntent {
-            wallet: "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798".into(),
+            owner_address: "0x0b3fc768f8bb3c772321e3e7781cac4a45585b4bc64043686beb634d65341798"
+                .into(),
             wallet_type: "native".into(),
             content_id: "0xABC".into(),
             timestamp_ms: 1763717731081,
@@ -101,7 +102,7 @@ mod tests {
         let message = Bcs::from(message_bytes); // ? Use original bytes!
 
         let signature = UserSignature::from_base64("AP8xz54+M1siqApZ7bHaC2CjJPgoQ29XzdYrXpgzsSB8Q7lbG3OzeDSfigrF6yt4VGjz8NFg1b4iCPNcvxVbfgvgZGvJv/l8yqkyIXGDszwfSgxh7rjpabvrSXDoR2lUmA==").unwrap();
-        let address = intent.wallet.parse().unwrap();
+        let address = intent.owner_address.parse().unwrap();
 
         let mut request = VerifySignatureRequest::default();
         request.message = Some(message);
@@ -120,9 +121,9 @@ mod tests {
         assert!(result.is_some());
         let (parsed_intent, parsed_address) = result.unwrap();
 
-        assert_eq!(parsed_intent.wallet, intent.wallet);
+        assert_eq!(parsed_intent.owner_address, intent.owner_address);
         assert_eq!(parsed_intent.content_id, intent.content_id);
         assert_eq!(parsed_intent.nonce, intent.nonce);
-        assert_eq!(parsed_address, intent.wallet);
+        assert_eq!(parsed_address, intent.owner_address);
     }
 }
