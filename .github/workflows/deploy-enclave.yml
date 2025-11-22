@@ -453,13 +453,19 @@ jobs:
         id: upload-eif
         run: |
           EIF_S3_PATH="s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/nitro-${{ steps.shorten-commit.outputs.sha_short }}.eif"
-          echo "📤 Uploading EIF to $EIF_S3_PATH"
+          YAML_S3_PATH="s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/allowed_endpoints-${{ steps.shorten-commit.outputs.sha_short }}.yaml"
+          ALLOWLIST_PATH="src/nautilus-server/src/apps/${{ env.ENCLAVE_APP }}/allowed_endpoints.yaml"
           
+          echo "📤 Uploading EIF to $EIF_S3_PATH"
           aws s3 cp out/nitro.eif "$EIF_S3_PATH" \
             --metadata "commit=${{ github.sha }},commit_short=${{ steps.shorten-commit.outputs.sha_short }},build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           
+          echo "📤 Uploading allowed_endpoints.yaml to $YAML_S3_PATH"
+          aws s3 cp "$ALLOWLIST_PATH" "$YAML_S3_PATH" \
+            --metadata "commit=${{ github.sha }},commit_short=${{ steps.shorten-commit.outputs.sha_short }},build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
           echo "eif_path=$EIF_S3_PATH" >> $GITHUB_OUTPUT
-          echo "✅ EIF uploaded successfully"
+          echo "✅ EIF and allowed_endpoints.yaml uploaded successfully"
 
       - name: Update Terraform EIF version
         id: update-eif-version
