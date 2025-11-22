@@ -140,21 +140,44 @@ pub async fn post_file_keys_(
         studio_initial_shared_versions: studio_versions,
     };
 
-    // Step 2: call enclave to get the encoded request (this touches enclave secrets)
+    // Step 2: call enclave to get the encoded request
     let client = reqwest::Client::new();
-    let encoded_resp: GetSealEncodedRequestsResponse = client
+    let response = client
         .post(format!("{host_base_url}/seal/encoded_requests"))
         .json(&get_req_params)
         .send()
         .await
         .map_err(|e| {
             EnclaveError::GenericError(format!("reqwest (encoded_requests) send error: {e}"))
-        })?
-        .json()
-        .await
-        .map_err(|e| {
-            EnclaveError::GenericError(format!("reqwest (encoded_requests) json error: {e}"))
         })?;
+
+    // Check if the response is successful
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(EnclaveError::GenericError(format!(
+            "Enclave endpoint failed (status {status}): {error_text}"
+        )));
+    }
+
+    // Get response text first to better handle errors
+    let response_text = response
+        .text()
+        .await
+        .map_err(|e| EnclaveError::GenericError(format!("Failed to read response body: {e}")))?;
+
+    // Try to parse as the expected response
+    let encoded_resp: GetSealEncodedRequestsResponse = serde_json::from_str(&response_text)
+        .map_err(|e| {
+            EnclaveError::GenericError(format!(
+                "Failed to parse encoded_requests response: {e}. Response was: {response_text}"
+            ))
+        })?;
+
+    print!("encoded_resp:{0}", encoded_resp.encoded_request);
 
     print!("encoded_resp:{0}", encoded_resp.encoded_request);
     let seal_responses = crate::zing_watermark::handlers::seal::fetch_seal_keys(
@@ -171,21 +194,37 @@ pub async fn post_file_keys_(
         seal_responses,
     };
 
-    let decrypt_resp: DecryptFileKeysResponse = client
+    let decrypt_response = client
         .post(format!("{host_base_url}/seal/decrypt_file_keys"))
         .json(&decrypt_request)
         .send()
         .await
         .map_err(|e| {
             EnclaveError::GenericError(format!("reqwest (decrypt_file_keys) send error: {e}"))
-        })?
-        .json()
-        .await
-        .map_err(|e| {
-            EnclaveError::GenericError(format!("reqwest (decrypt_file_keys) json error: {e}"))
         })?;
 
-    // Build a small summary response to the caller
+    let decrypt_status = decrypt_response.status();
+    if !decrypt_status.is_success() {
+        let error_text = decrypt_response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(EnclaveError::GenericError(format!(
+            "Decrypt endpoint failed (status {decrypt_status}): {error_text}"
+        )));
+    }
+
+    let decrypt_resp_text = decrypt_response.text().await.map_err(|e| {
+        EnclaveError::GenericError(format!("Failed to read decrypt response body: {e}"))
+    })?;
+
+    let decrypt_resp: DecryptFileKeysResponse =
+        serde_json::from_str(&decrypt_resp_text).map_err(|e| {
+            EnclaveError::GenericError(format!(
+                "Failed to parse decrypt_file_keys response: {e}. Response was: {decrypt_resp_text}"
+            ))
+        })?;
+
     let refresh_resp = RefreshResponse {
         updated: decrypt_resp.loaded_keys_count,
         total_wallets: fetch_resp.successes.len(),

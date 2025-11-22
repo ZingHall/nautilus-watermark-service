@@ -5,3 +5,5 @@
 endpoints:
   - fullnode.testnet.sui.io  # mysten testnet url (HTTPS uses port 443 by default)
   - api.weatherapi.com
+  - seal-key-server-testnet-1.mystenlabs.com
+  - seal-key-server-testnet-2.mystenlabs.com

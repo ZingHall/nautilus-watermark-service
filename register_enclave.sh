@@ -62,8 +62,14 @@ fi
 echo "ATTESTATION_ARRAY length: ${#ATTESTATION_ARRAY}"
 echo 'converted attestation'
 # Execute sui client command with the converted array and provided arguments
+# sui client ptb --assign v "vector$ATTESTATION_ARRAY" \
+#     --move-call "0x2::nitro_attestation::load_nitro_attestation" v @0x6 \
+#     --assign result \
+#     --move-call "${ENCLAVE_PACKAGE_ID}::enclave::update_pcrs_with_document" @${ENCLAVE_CONFIG_OBJECT_ID} @${ADMIN_CAP_OBJECT_ID} result \
+#     --gas-budget 100000000
+
 sui client ptb --assign v "vector$ATTESTATION_ARRAY" \
     --move-call "0x2::nitro_attestation::load_nitro_attestation" v @0x6 \
     --assign result \
-    --move-call "${ENCLAVE_PACKAGE_ID}::enclave::update_pcrs_with_document" @${ENCLAVE_CONFIG_OBJECT_ID} @${ADMIN_CAP_OBJECT_ID} result \
+    --move-call "${ENCLAVE_PACKAGE_ID}::enclave::register_enclave" @${ENCLAVE_CONFIG_OBJECT_ID} result \
     --gas-budget 100000000

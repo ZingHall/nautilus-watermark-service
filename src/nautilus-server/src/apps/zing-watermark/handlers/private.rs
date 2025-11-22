@@ -19,6 +19,7 @@ use sui_sdk_types::{
     Address, Argument, Command, Identifier, Input, MoveCall, PersonalMessage,
     ProgrammableTransaction, TypeTag,
 };
+use tracing::info;
 
 use crate::zing_watermark::models::Studio;
 use crate::zing_watermark::{types::*, ENCLAVE_OBJECT, ENCRYPTION_KEYS, FILE_KEYS, SEAL_CONFIG};
@@ -200,7 +201,7 @@ fn parse_studio_from_result(
 }
 
 // get_seal_encoded_requests
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GetSealEncodedRequestsParams {
     #[serde(deserialize_with = "deserialize_wallet_addresses")]
     pub wallet_addresses: Vec<Address>,
@@ -216,6 +217,8 @@ pub async fn get_seal_encoded_requests(
     State(state): State<Arc<AppState>>,
     Json(request): Json<GetSealEncodedRequestsParams>,
 ) -> Result<Json<GetSealEncodedRequestsResponse>, EnclaveError> {
+    info!("Received request: {:?}", request);
+
     let enclave_object_guard = ENCLAVE_OBJECT.read().await;
     let enclave_object_opt = &*enclave_object_guard;
 
