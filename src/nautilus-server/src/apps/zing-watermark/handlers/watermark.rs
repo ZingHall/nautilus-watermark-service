@@ -161,9 +161,13 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires actual mTLS certificates and service
     async fn test_call_watermark_service() {
+        // Create a minimal valid PNG image (1x1 pixel) in base64
+        let minimal_png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        
         let request = WatermarkRequest {
             file_id: "test-file-123".to_string(),
             user_id: "test-user-456".to_string(),
+            image: minimal_png_base64.to_string(),
             data: Some("test content".to_string()),
         };
 

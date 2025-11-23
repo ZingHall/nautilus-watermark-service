@@ -218,8 +218,6 @@ pub fn create_http_client() -> Client {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_cert_config_from_env() {
         // This test would require actual certificate data
