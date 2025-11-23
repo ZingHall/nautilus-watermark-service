@@ -5,9 +5,9 @@
 # - Setup script for nautilus-server that acts as an init script
 # - Sets up Python and library paths
 # - Configures loopback network and /etc/hosts
-# - Waits for secrets.json to be passed from the parent instance. 
+# - Secrets are delivered via HTTP API: POST http://localhost:3001/admin/update-secrets
+#   (Handled by Rust code in the nautilus-server application)
 # - Forwards VSOCK port 3000 to localhost:3000
-# - Optionally pulls secrets and sets in environmen variables.
 # - Launches nautilus-server
 
 # Don't exit on error - we want to continue even if some commands fail
@@ -43,127 +43,19 @@ echo "127.0.0.1   localhost" > /etc/hosts
 echo "[RUN_SH] /etc/hosts configuration:"
 cat /etc/hosts
 
-# Function to process and apply secrets from JSON
-process_secrets() {
-  local JSON_RESPONSE="$1"
-  
-  if [ -z "$JSON_RESPONSE" ] || [ "$JSON_RESPONSE" = "{}" ]; then
-    return 1
-  fi
-  
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "[RUN_SH] ⚠️  Warning: jq not available, cannot process secrets"
-    return 1
-  fi
-  
-  echo "[RUN_SH] Processing secrets JSON..."
-  echo "$JSON_RESPONSE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpairs 2>/dev/null || return 1
-  
-  if [ ! -f /tmp/kvpairs ] || [ ! -s /tmp/kvpairs ]; then
-    return 1
-  fi
-  
-  echo "[RUN_SH] Loading environment variables from JSON..."
-  while IFS="=" read -r key value; do
-    # Skip empty keys
-    [ -z "$key" ] && continue
-    export "$key"="$value"
-    echo "[RUN_SH] Exported: $key"
-  done < /tmp/kvpairs
-  rm -f /tmp/kvpairs
-  
-  # Handle mTLS client certificates if provided via MTLS_CLIENT_CERT_JSON
-  if [ -n "$MTLS_CLIENT_CERT_JSON" ]; then
-    echo "[RUN_SH] Writing mTLS client certificates..."
-    mkdir -p /opt/enclave/certs || {
-      echo "[RUN_SH] Error: Failed to create /opt/enclave/certs directory"
-      return 1
-    }
-    
-    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_cert' > /opt/enclave/certs/client.crt 2>/dev/null || {
-      echo "[RUN_SH] Error: Failed to write client.crt"
-      return 1
-    }
-    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_key' > /opt/enclave/certs/client.key 2>/dev/null || {
-      echo "[RUN_SH] Error: Failed to write client.key"
-      return 1
-    }
-    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.ca_cert' > /opt/enclave/certs/ecs-ca.crt 2>/dev/null || {
-      echo "[RUN_SH] Error: Failed to write ecs-ca.crt"
-      return 1
-    }
-    
-    # Set proper permissions
-    chmod 600 /opt/enclave/certs/client.key 2>/dev/null || true
-    chmod 644 /opt/enclave/certs/client.crt 2>/dev/null || true
-    chmod 644 /opt/enclave/certs/ecs-ca.crt 2>/dev/null || true
-    
-    if [ -f /opt/enclave/certs/client.crt ] && [ -f /opt/enclave/certs/client.key ] && [ -f /opt/enclave/certs/ecs-ca.crt ]; then
-      echo "[RUN_SH] ✅ mTLS client certificates written to /opt/enclave/certs/"
-      ls -lh /opt/enclave/certs/ || true
-      return 0
-    else
-      echo "[RUN_SH] ⚠️  Warning: Failed to write some mTLS certificate files"
-      ls -la /opt/enclave/certs/ || true
-      return 1
-    fi
-  else
-    echo "[RUN_SH] MTLS_CLIENT_CERT_JSON not set in secrets"
-    return 1
-  fi
+# Ensure certificate directory exists (needed for HTTP API)
+echo "[RUN_SH] Ensuring certificate directory exists..."
+mkdir -p /opt/enclave/certs || {
+  echo "[RUN_SH] ⚠️  Warning: Failed to create /opt/enclave/certs directory"
 }
 
-# Try to get initial secrets with short timeout (for backward compatibility)
-# Use a short timeout (5 seconds) to avoid blocking nautilus-server startup
-# The nautilus SDK expects a "ready" signal quickly, so we can't wait too long
-echo "[RUN_SH] Waiting for initial secrets via VSOCK (timeout: 5s)..."
-INITIAL_SECRETS='{}'
-if command -v timeout >/dev/null 2>&1; then
-  INITIAL_SECRETS=$(timeout 5 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
-elif command -v busybox >/dev/null 2>&1 && busybox timeout --help >/dev/null 2>&1; then
-  INITIAL_SECRETS=$(busybox timeout -t 5 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
-else
-  # Fallback: try once without blocking
-  echo "[RUN_SH] Warning: timeout command not available, trying non-blocking read"
-  INITIAL_SECRETS='{}'
-fi
-
-# Process initial secrets if received
-if [ -n "$INITIAL_SECRETS" ] && [ "$INITIAL_SECRETS" != "{}" ]; then
-  echo "[RUN_SH] ✅ Received initial secrets during startup"
-  process_secrets "$INITIAL_SECRETS" || echo "[RUN_SH] ⚠️  Failed to process initial secrets"
-else
-  echo "[RUN_SH] ⚠️  No initial secrets received (will continue listening in background)"
-fi
-
-# Start persistent VSOCK listener in background for secret updates
-# This allows secrets to be sent at any time, not just during startup
-echo "[RUN_SH] Starting persistent VSOCK listener on port 7777 for secret updates..."
-(
-  while true; do
-    echo "[SECRETS_LISTENER] Waiting for secrets on VSOCK port 7777..."
-    SECRETS_JSON=$(socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
-    
-    if [ -n "$SECRETS_JSON" ] && [ "$SECRETS_JSON" != "{}" ]; then
-      echo "[SECRETS_LISTENER] ✅ Received secrets update"
-      if process_secrets "$SECRETS_JSON"; then
-        echo "[SECRETS_LISTENER] ✅ Successfully updated certificates"
-      else
-        echo "[SECRETS_LISTENER] ⚠️  Failed to process secrets update"
-      fi
-    else
-      echo "[SECRETS_LISTENER] ⚠️  Received empty or invalid secrets"
-    fi
-    # Small delay before next listen to avoid tight loop
-    sleep 1
-  done
-) &
-SECRETS_LISTENER_PID=$!
-echo "[RUN_SH] Persistent secrets listener started (PID: $SECRETS_LISTENER_PID)"
-
-# Note: Secrets processing is now handled by the process_secrets() function above
-# and the persistent listener. This section is kept for backward compatibility
-# but should be empty since secrets are processed in the function.
+# Note: Secrets are delivered exclusively via HTTP API
+# POST http://localhost:3001/admin/update-secrets
+# This is handled by the Rust code in nautilus-server, not by this shell script.
+# The HTTP API will write certificates directly to /opt/enclave/certs/
+echo "[RUN_SH] Secrets will be delivered via HTTP API after server starts"
+echo "[RUN_SH] Endpoint: POST http://localhost:3001/admin/update-secrets"
+echo "[RUN_SH] The host will send secrets automatically via expose_enclave.sh"
 
 # Run traffic forwarder in background and start the server
 # Forwards traffic from 127.0.0.x -> Port 443 at CID 3 Listening on port 800x
@@ -261,6 +153,7 @@ echo "[RUN_SH]   LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 echo "[RUN_SH]   PYTHONPATH=$PYTHONPATH"
 echo "[RUN_SH]   ECS_WATERMARK_ENDPOINT=$ECS_WATERMARK_ENDPOINT"
 echo "[RUN_SH]   MTLS_CLIENT_CERT_JSON=${MTLS_CLIENT_CERT_JSON:+set (length: ${#MTLS_CLIENT_CERT_JSON})}${MTLS_CLIENT_CERT_JSON:-not set}"
+echo "[RUN_SH] Note: mTLS certificates will be written via HTTP API after server starts"
 
 # Verify socat processes are still running
 echo "[RUN_SH] Checking socat processes..."

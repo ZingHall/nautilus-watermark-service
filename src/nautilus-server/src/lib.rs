@@ -56,6 +56,12 @@ impl fmt::Display for EnclaveError {
 
 impl std::error::Error for EnclaveError {}
 
+impl From<std::io::Error> for EnclaveError {
+    fn from(err: std::io::Error) -> Self {
+        EnclaveError::GenericError(format!("IO error: {}", err))
+    }
+}
+
 /// HexPrefix is a wrapper around the Hex encoding that adds a '0x' prefix to the encoded string.'
 /// Decoding accepts strings with or without the '0x' prefix.
 pub struct PrefixedHex;

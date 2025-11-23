@@ -3,6 +3,7 @@ pub mod models;
 pub mod types;
 
 use crate::zing_watermark::handlers::private::setup_enclave_object;
+use crate::zing_watermark::handlers::secrets::update_secrets;
 use crate::AppState;
 use crate::EnclaveError;
 use axum::Json;
@@ -70,6 +71,7 @@ pub async fn spawn_host_init_server(state: Arc<AppState>) -> Result<(), EnclaveE
         .route("/setup_enclave_object", post(setup_enclave_object))
         .route("/seal/encoded_requests", post(get_seal_encoded_requests))
         .route("/seal/decrypt_file_keys", post(decrypt_file_keys))
+        .route("/admin/update-secrets", post(update_secrets))
         .with_state(state);
 
     let host_listener = TcpListener::bind("0.0.0.0:3001")
