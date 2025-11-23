@@ -59,40 +59,35 @@ else
   echo "[RUN_SH] ✅ VSOCK listener on port 3001 is ready (PID: $SOCAT_3001_PID)"
 fi
 
-# Get a json blob with key/value pair for secrets
-# Use shorter timeout for initial attempt, then start persistent listener
-echo "[RUN_SH] Waiting for initial secrets via VSOCK (timeout: 10s)..."
-JSON_RESPONSE=$(timeout 10 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '')
+# Secrets are optional - start server immediately without waiting
+# If secrets are needed later, they can be sent via the /api/secrets endpoint
+echo "[RUN_SH] Starting server (secrets are optional - can be updated later via API)"
+JSON_RESPONSE='{}'
 
-# If we got an empty response or timeout, use empty JSON and start persistent listener
-if [ -z "$JSON_RESPONSE" ]; then
-  echo "[RUN_SH] ⚠️  No initial secrets received (will continue listening in background)"
-  JSON_RESPONSE='{}'
-  
-  # Start persistent VSOCK listener in background for secret updates
-  (
-    echo "[SECRETS_LISTENER] Starting persistent VSOCK listener on port 7777..."
-    while true; do
-      UPDATE=$(socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '')
-      if [ -n "$UPDATE" ] && [ "$UPDATE" != "{}" ]; then
-        echo "[SECRETS_LISTENER] ✅ Received secrets update"
-        # Process the update (same logic as initial secrets)
-        if command -v jq >/dev/null 2>&1; then
-          echo "$UPDATE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpairs_update 2>/dev/null || true
-          if [ -f /tmp/kvpairs_update ] && [ -s /tmp/kvpairs_update ]; then
-            while IFS="=" read -r key value; do
-              export "$key"="$value"
-            done < /tmp/kvpairs_update
-            echo "[SECRETS_LISTENER] ✅ Updated environment variables from secrets"
-            rm -f /tmp/kvpairs_update
-          fi
+# Optionally start a background listener for secrets (non-blocking)
+# This allows secrets to be sent via VSOCK if needed, but won't delay startup
+(
+  echo "[SECRETS_LISTENER] Optional VSOCK listener on port 7777 (non-blocking)..."
+  while true; do
+    UPDATE=$(socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '')
+    if [ -n "$UPDATE" ] && [ "$UPDATE" != "{}" ]; then
+      echo "[SECRETS_LISTENER] ✅ Received secrets via VSOCK"
+      # Process the update
+      if command -v jq >/dev/null 2>&1; then
+        echo "$UPDATE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpairs_update 2>/dev/null || true
+        if [ -f /tmp/kvpairs_update ] && [ -s /tmp/kvpairs_update ]; then
+          while IFS="=" read -r key value; do
+            export "$key"="$value"
+          done < /tmp/kvpairs_update
+          echo "[SECRETS_LISTENER] ✅ Updated environment variables from secrets"
+          rm -f /tmp/kvpairs_update
         fi
       fi
-    done
-  ) &
-  SECRETS_LISTENER_PID=$!
-  echo "[SECRETS_LISTENER] Persistent listener started (PID: $SECRETS_LISTENER_PID)"
-fi
+    fi
+  done
+) &
+SECRETS_LISTENER_PID=$!
+echo "[SECRETS_LISTENER] Background listener started (PID: $SECRETS_LISTENER_PID) - optional"
 
 # Sets all key value pairs as env variables that will be referred by the server
 # This is shown as a example below. For production usecases, it's best to set the
