@@ -2,8 +2,9 @@ use anyhow::Result;
 use axum::{routing::get, routing::post, Router};
 use fastcrypto::{ed25519::Ed25519KeyPair, traits::KeyPair};
 use nautilus_server::common::{get_attestation, health_check};
-use nautilus_server::zing_watermark::handlers::public::{
-    decrypt_files, list_file_keys, post_file_keys, test_fetch,
+use nautilus_server::zing_watermark::handlers::{
+    public::{decrypt_files, list_file_keys, post_file_keys, test_fetch},
+    stego::{embed_message, extract_message, validate_png},
 };
 use nautilus_server::AppState;
 use std::sync::Arc;
@@ -48,6 +49,10 @@ async fn main() -> Result<()> {
         // POST
         .route("/file_keys", post(post_file_keys))
         .route("/files/decrypt", post(decrypt_files))
+        // Steganography test endpoints
+        .route("/test/stego/embed", post(embed_message))
+        .route("/test/stego/extract", post(extract_message))
+        .route("/test/stego/validate", post(validate_png))
         .with_state(state)
         .layer(cors);
 
