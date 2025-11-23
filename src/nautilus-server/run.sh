@@ -62,6 +62,27 @@ if command -v jq >/dev/null 2>&1; then
     echo "[RUN_SH] No secrets to load"
   fi
   rm -f /tmp/kvpairs
+  
+  # Handle mTLS client certificates if provided via MTLS_CLIENT_CERT_JSON
+  if [ -n "$MTLS_CLIENT_CERT_JSON" ]; then
+    echo "[RUN_SH] Writing mTLS client certificates..."
+    mkdir -p /opt/enclave/certs
+    
+    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_cert' > /opt/enclave/certs/client.crt 2>/dev/null || true
+    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_key' > /opt/enclave/certs/client.key 2>/dev/null || true
+    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.ca_cert' > /opt/enclave/certs/ecs-ca.crt 2>/dev/null || true
+    
+    # Set proper permissions
+    chmod 600 /opt/enclave/certs/client.key 2>/dev/null || true
+    chmod 644 /opt/enclave/certs/client.crt 2>/dev/null || true
+    chmod 644 /opt/enclave/certs/ecs-ca.crt 2>/dev/null || true
+    
+    if [ -f /opt/enclave/certs/client.crt ] && [ -f /opt/enclave/certs/client.key ] && [ -f /opt/enclave/certs/ecs-ca.crt ]; then
+      echo "[RUN_SH] mTLS client certificates written to /opt/enclave/certs/"
+    else
+      echo "[RUN_SH] Warning: Failed to write some mTLS certificate files"
+    fi
+  fi
 else
   echo "[RUN_SH] Warning: jq not available, skipping secrets parsing"
 fi

@@ -7,3 +7,4 @@ endpoints:
   - api.weatherapi.com
   - seal-key-server-testnet-1.mystenlabs.com
   - seal-key-server-testnet-2.mystenlabs.com
+  - watermark.internal.staging.zing.you  # ECS Watermark Service (via Route53, port 8080)

@@ -17,6 +17,9 @@ pub mod common;
 #[path = "apps/zing-watermark/mod.rs"]
 pub mod zing_watermark;
 
+#[path = "mtls_client.rs"]
+pub mod mtls_client;
+
 /// App state, at minimum needs to maintain the ephemeral keypair.  
 pub struct AppState {
     /// Ephemeral keypair on boot

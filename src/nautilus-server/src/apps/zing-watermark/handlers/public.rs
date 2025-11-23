@@ -9,6 +9,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use sui_rpc::proto::sui::rpc::v2::{Bcs, VerifySignatureRequest};
 use sui_sdk_types::UserSignature;
+use tracing::{info, warn};
 
 use crate::{
     zing_watermark::{
@@ -20,6 +21,7 @@ use crate::{
                 GetSealEncodedRequestsResponse,
             },
             verify::{verify_and_parse_request_intent, PersonalMessage, RequestIntent},
+            watermark::{call_watermark_service, WatermarkRequest},
         },
         FILE_KEYS, SEAL_CONFIG, ZING_FILE_KEY_IV_12_BYTES,
     },
@@ -324,10 +326,48 @@ pub async fn decrypt_files(
 
     let decrypted_data = decrypt_content(&encrypted_content_bytes, &decryption_key)?;
 
-    let decrypted_content_base64 = general_purpose::STANDARD.encode(decrypted_data);
+    // Check if decrypted data is a PNG image (check PNG signature: 89 50 4E 47 0D 0A 1A 0A)
+    let is_png = decrypted_data.len() >= 8 
+        && decrypted_data[0..4] == [0x89, 0x50, 0x4E, 0x47]
+        && decrypted_data[4..8] == [0x0D, 0x0A, 0x1A, 0x0A];
+
+    let final_data = if is_png {
+        // Decrypted data is a PNG image, apply watermark
+        info!("[DECRYPT] Decrypted content is a PNG image, applying watermark");
+        
+        let decrypted_content_base64 = general_purpose::STANDARD.encode(&decrypted_data);
+        
+        // Call watermark service
+        let watermark_request = WatermarkRequest {
+            file_id: request_intent.content_id.clone(),
+            user_id: request_intent.owner_address.clone(),
+            image: decrypted_content_base64.clone(), // Base64 encoded PNG image
+            data: None, // Optional additional data to embed
+        };
+
+        match call_watermark_service(watermark_request).await {
+            Ok(watermark_response) => {
+                if let Some(watermarked_data) = watermark_response.watermarked_data {
+                    info!("[DECRYPT] Watermark applied successfully");
+                    watermarked_data
+                } else {
+                    warn!("[DECRYPT] Watermark service returned no watermarked_data, using original");
+                    decrypted_content_base64
+                }
+            }
+            Err(e) => {
+                warn!("[DECRYPT] Failed to apply watermark: {}. Using original decrypted content.", e);
+                decrypted_content_base64
+            }
+        }
+    } else {
+        // Not a PNG image, return original decrypted content
+        info!("[DECRYPT] Decrypted content is not a PNG image, skipping watermark");
+        general_purpose::STANDARD.encode(decrypted_data)
+    };
 
     Ok(Json(DecryptFilesResponse {
-        decrypted_data: decrypted_content_base64,
+        decrypted_data: final_data,
     }))
 }
 

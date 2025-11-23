@@ -154,7 +154,7 @@ pub async fn health_check(
         "src/nautilus-server/src/apps/zing-watermark/allowed_endpoints.yaml",
     ];
     
-    let endpoints_status = match Client::builder()
+    let mut endpoints_status = match Client::builder()
         .timeout(Duration::from_secs(2)) // Short timeout for ALB health checks (5s total ALB timeout)
         .build()
     {
@@ -244,6 +244,35 @@ pub async fn health_check(
             HashMap::new()
         }
     };
+
+    // Check watermark service health (if configured)
+    // This uses mTLS to check the watermark service at watermark.internal.staging.zing.you
+    let watermark_endpoint = std::env::var("ECS_WATERMARK_ENDPOINT")
+        .unwrap_or_else(|_| "https://watermark.internal.staging.zing.you:8080".to_string());
+    
+    // Extract hostname from endpoint for the status key
+    let watermark_hostname = watermark_endpoint
+        .replace("https://", "")
+        .replace("http://", "")
+        .split(':')
+        .next()
+        .unwrap_or("watermark.internal.staging.zing.you")
+        .to_string();
+    
+    info!("[HEALTH_CHECK] Checking watermark service health at: {}", watermark_endpoint);
+    let watermark_healthy = match crate::zing_watermark::handlers::watermark::check_watermark_health().await {
+        Ok(is_healthy) => {
+            info!("[HEALTH_CHECK] Watermark service health: {}", if is_healthy { "healthy" } else { "unhealthy" });
+            is_healthy
+        }
+        Err(e) => {
+            info!("[HEALTH_CHECK] Failed to check watermark service health: {}", e);
+            false
+        }
+    };
+    
+    // Add watermark service status to endpoints_status
+    endpoints_status.insert(watermark_hostname, watermark_healthy);
 
     // Always return 200 OK - endpoint status is informational
     Ok(Json(HealthCheckResponse {
