@@ -18,25 +18,6 @@ fn binary_to_string(bytes: &[u8]) -> Result<String> {
         .context("Failed to decode UTF-8 string from binary data")
 }
 
-/// Convert bytes to binary string representation (for header parsing)
-fn bytes_to_binary_string(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{:08b}", byte))
-        .collect::<String>()
-}
-
-/// Convert binary string to bytes
-fn binary_string_to_bytes(binary: &str) -> Vec<u8> {
-    binary
-        .as_bytes()
-        .chunks(8)
-        .map(|chunk| {
-            let byte_str = std::str::from_utf8(chunk).unwrap_or("00000000");
-            u8::from_str_radix(byte_str, 2).unwrap_or(0)
-        })
-        .collect()
-}
 
 /// Create a header with magic string, version, and message byte length
 fn create_header(message_byte_length: usize) -> Vec<u8> {
@@ -44,15 +25,30 @@ fn create_header(message_byte_length: usize) -> Vec<u8> {
     string_to_binary(&header)
 }
 
-/// Parse header to extract message length
-fn parse_header(binary_data: &[u8]) -> Result<(usize, usize)> {
-    // Try to read first 200 bits (25 bytes, should be enough for header)
-    let header_bytes = binary_data.get(0..200.min(binary_data.len())).unwrap_or(&[]);
-    let header_binary = bytes_to_binary_string(header_bytes);
+/// Parse header from binary bits (as a string of '0' and '1' characters)
+fn parse_header_from_bits(binary_bits: &str) -> Result<(usize, usize)> {
+    // Try to read first 200 bits (should be enough for header)
+    let header_bits = if binary_bits.len() >= 200 {
+        &binary_bits[0..200]
+    } else {
+        binary_bits
+    };
     
-    // Convert binary string to bytes for UTF-8 decoding
-    let header_bytes_decoded = binary_string_to_bytes(&header_binary);
-    let header_text = binary_to_string(&header_bytes_decoded)?;
+    // Convert binary string to bytes (8 bits per byte)
+    let mut header_bytes = Vec::new();
+    for chunk in header_bits.as_bytes().chunks(8) {
+        if chunk.len() == 8 {
+            let mut byte = 0u8;
+            for (i, &bit_char) in chunk.iter().enumerate() {
+                let bit = if bit_char == b'1' { 1 } else { 0 };
+                byte |= bit << (7 - i);
+            }
+            header_bytes.push(byte);
+        }
+    }
+    
+    // Decode UTF-8 string from bytes
+    let header_text = binary_to_string(&header_bytes)?;
 
     // Parse header using regex
     let re = regex::Regex::new(r"ZING_STEGO\|v(\d+)\|len:(\d+)\|")
@@ -200,8 +196,8 @@ pub fn extract_message(image_buffer: &[u8]) -> Result<String> {
     let mut buf = vec![0u8; reader.output_buffer_size()];
     reader.next_frame(&mut buf)?;
     
-    // Extract bits from LSBs
-    let mut binary_bits = Vec::new();
+    // Extract bits from LSBs as a binary string (like TypeScript version)
+    let mut binary_bits_string = String::new();
     
     for chunk in buf.chunks_exact(bytes_per_pixel) {
         for (channel_idx, &pixel_value) in chunk.iter().enumerate() {
@@ -216,42 +212,42 @@ pub fn extract_message(image_buffer: &[u8]) -> Result<String> {
                 continue;
             }
             
-            binary_bits.push(pixel_value & 1);
+            // Append bit as character ('0' or '1')
+            binary_bits_string.push(if (pixel_value & 1) == 1 { '1' } else { '0' });
         }
     }
     
-    // Convert bits to bytes (8 bits per byte)
-    let mut binary_bytes = Vec::new();
-    for chunk in binary_bits.chunks(8) {
-        let mut byte = 0u8;
-        for (i, &bit) in chunk.iter().enumerate() {
-            if chunk.len() == 8 {
-                byte |= (bit as u8) << (7 - i);
-            }
-        }
-        if chunk.len() == 8 {
-            binary_bytes.push(byte);
-        }
-    }
+    // Parse header from binary bits string
+    let (header_length_bits, message_length) = parse_header_from_bits(&binary_bits_string)?;
     
-    // Parse header
-    let (header_length_bits, message_length) = parse_header(&binary_bytes)?;
-    let header_length_bytes = header_length_bits / 8;
+    // Extract message bits (as binary string)
+    let message_start_bit = header_length_bits;
+    let message_end_bit = message_start_bit + (message_length * 8);
     
-    // Extract message bits
-    let message_start_byte = header_length_bytes;
-    let message_end_byte = message_start_byte + message_length;
-    
-    if message_end_byte > binary_bytes.len() {
+    if message_end_bit > binary_bits_string.len() {
         return Err(anyhow::anyhow!(
-            "Message length exceeds available data. Expected {} bytes, but only {} bytes available",
-            message_length,
-            binary_bytes.len() - message_start_byte
+            "Message length exceeds available data. Expected {} bits, but only {} bits available",
+            message_length * 8,
+            binary_bits_string.len() - message_start_bit
         ));
     }
     
-    let message_bytes = &binary_bytes[message_start_byte..message_end_byte];
-    binary_to_string(message_bytes)
+    let message_binary = &binary_bits_string[message_start_bit..message_end_bit];
+    
+    // Convert binary string to bytes
+    let mut message_bytes = Vec::new();
+    for chunk in message_binary.as_bytes().chunks(8) {
+        if chunk.len() == 8 {
+            let mut byte = 0u8;
+            for (i, &bit_char) in chunk.iter().enumerate() {
+                let bit = if bit_char == b'1' { 1 } else { 0 };
+                byte |= bit << (7 - i);
+            }
+            message_bytes.push(byte);
+        }
+    }
+    
+    binary_to_string(&message_bytes)
 }
 
 /// Validate if buffer is a valid PNG
