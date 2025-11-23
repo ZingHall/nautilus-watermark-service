@@ -8,6 +8,7 @@ on:
       - 'Containerfile'
       - 'Makefile'
       - 'Cargo.toml'
+      - 'expose_enclave.sh'
       - '.github/workflows/deploy-enclave.yml'
   workflow_dispatch:
     inputs:
@@ -207,6 +208,14 @@ jobs:
             echo "exists=false" >> $GITHUB_OUTPUT
             echo "ℹ️ EIF file not found, will build new one"
           fi
+          
+          # Always upload expose_enclave.sh (it's version-agnostic and should be updated when changed)
+          EXPOSE_SCRIPT_S3_PATH="s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/expose_enclave.sh"
+          echo "📤 Uploading expose_enclave.sh to $EXPOSE_SCRIPT_S3_PATH"
+          aws s3 cp expose_enclave.sh "$EXPOSE_SCRIPT_S3_PATH" \
+            --metadata "commit=${{ github.sha }},commit_short=${{ steps.shorten-commit.outputs.sha_short }},build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" || {
+            echo "⚠️  Warning: Failed to upload expose_enclave.sh, but continuing..."
+          }
 
       - name: Verify allowed_endpoints.yaml configuration
         if: steps.check-eif.outputs.exists == 'false'
@@ -463,6 +472,8 @@ jobs:
           YAML_S3_PATH="s3://${{ steps.s3.outputs.bucket }}/${{ steps.s3.outputs.path }}/allowed_endpoints-${{ steps.shorten-commit.outputs.sha_short }}.yaml"
           ALLOWLIST_PATH="src/nautilus-server/src/apps/${{ env.ENCLAVE_APP }}/allowed_endpoints.yaml"
           
+          # Note: expose_enclave.sh is uploaded in the check-eif step (always, regardless of EIF build)
+          
           echo "📤 Uploading EIF to $EIF_S3_PATH"
           aws s3 cp out/nitro.eif "$EIF_S3_PATH" \
             --metadata "commit=${{ github.sha }},commit_short=${{ steps.shorten-commit.outputs.sha_short }},build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -470,6 +481,9 @@ jobs:
           echo "📤 Uploading allowed_endpoints.yaml to $YAML_S3_PATH"
           aws s3 cp "$ALLOWLIST_PATH" "$YAML_S3_PATH" \
             --metadata "commit=${{ github.sha }},commit_short=${{ steps.shorten-commit.outputs.sha_short }},build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          
+          # Note: expose_enclave.sh is also uploaded in the check-eif step (always, regardless of EIF build)
+          # This ensures it's always up-to-date even when EIF build is skipped
           
           echo "eif_path=$EIF_S3_PATH" >> $GITHUB_OUTPUT
           echo "✅ EIF and allowed_endpoints.yaml uploaded successfully"
