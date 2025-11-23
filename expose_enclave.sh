@@ -53,9 +53,9 @@ if [ "$MTLS_SECRET_VALUE" != "{}" ] && [ -n "$MTLS_SECRET_VALUE" ] && echo "$MTL
     TMP_SECRETS=$(mktemp)
     echo "$MTLS_SECRET_VALUE" > "$TMP_SECRETS"
     
-    # Use timeout for jq processing as well (5 seconds max)
+    # Use timeout for jq processing (10 seconds max - increased from 5s for large certs)
     # Capture stderr to see errors if jq fails
-    JQ_OUTPUT=$(timeout 5 jq -n \
+    JQ_OUTPUT=$(timeout 10 jq -n \
         --slurpfile cert_json "$TMP_SECRETS" \
         --arg endpoint "https://watermark.internal.staging.zing.you:8080" \
         '{
