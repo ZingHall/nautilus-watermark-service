@@ -1,5 +1,6 @@
 pub mod handlers;
 pub mod models;
+pub mod stego;
 pub mod types;
 
 use crate::zing_watermark::handlers::private::setup_enclave_object;
