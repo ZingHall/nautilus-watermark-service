@@ -9,6 +9,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use sui_rpc::proto::sui::rpc::v2::{Bcs, VerifySignatureRequest};
 use sui_sdk_types::UserSignature;
+use tracing::{info, warn};
 
 use crate::{
     zing_watermark::{
@@ -21,6 +22,7 @@ use crate::{
             },
             verify::{verify_and_parse_request_intent, PersonalMessage, RequestIntent},
         },
+        stego,
         FILE_KEYS, SEAL_CONFIG, ZING_FILE_KEY_IV_12_BYTES,
     },
     AppState, EnclaveError,
@@ -324,10 +326,34 @@ pub async fn decrypt_files(
 
     let decrypted_data = decrypt_content(&encrypted_content_bytes, &decryption_key)?;
 
-    let decrypted_content_base64 = general_purpose::STANDARD.encode(decrypted_data);
+    // Check if decrypted data is a PNG image (PNG signature: 89 50 4E 47 0D 0A 1A 0A)
+    let is_png = decrypted_data.len() >= 8
+        && decrypted_data[0..4] == [0x89, 0x50, 0x4E, 0x47]
+        && decrypted_data[4..8] == [0x0D, 0x0A, 0x1A, 0x0A];
+
+    let final_data = if is_png {
+        // Decrypted data is a PNG image, embed owner_address using steganography
+        info!("[DECRYPT] Decrypted content is a PNG image, embedding owner_address: {}", request_intent.owner_address);
+        
+        // Embed owner_address into PNG using steganography
+        match stego::embed_message(&decrypted_data, &request_intent.owner_address) {
+            Ok(watermarked_image) => {
+                info!("[DECRYPT] Successfully embedded owner_address into PNG using steganography");
+                general_purpose::STANDARD.encode(&watermarked_image)
+            }
+            Err(e) => {
+                warn!("[DECRYPT] Failed to embed owner_address using steganography: {}. Using original decrypted content.", e);
+                general_purpose::STANDARD.encode(decrypted_data)
+            }
+        }
+    } else {
+        // Not a PNG image, return original decrypted content
+        info!("[DECRYPT] Decrypted content is not a PNG image, skipping steganography");
+        general_purpose::STANDARD.encode(decrypted_data)
+    };
 
     Ok(Json(DecryptFilesResponse {
-        decrypted_data: decrypted_content_base64,
+        decrypted_data: final_data,
     }))
 }
 
