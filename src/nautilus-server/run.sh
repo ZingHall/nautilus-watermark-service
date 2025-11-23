@@ -37,15 +37,61 @@ echo "127.0.0.1   localhost" > /etc/hosts
 echo "[RUN_SH] /etc/hosts configuration:"
 cat /etc/hosts
 
-# Get a json blob with key/value pair for secrets
-# Use timeout to prevent blocking indefinitely (30 seconds timeout)
-echo "[RUN_SH] Waiting for secrets.json via VSOCK (timeout: 30s)..."
-JSON_RESPONSE=$(timeout 30 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+# Start VSOCK listeners for ports 3000 and 3001 FIRST (before waiting for secrets)
+# This ensures the enclave is ready to accept connections immediately
+echo "[RUN_SH] Starting VSOCK listeners for server ports..."
+socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
+SOCAT_3000_PID=$!
+socat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &
+SOCAT_3001_PID=$!
+sleep 1
 
-# If we got an empty response or timeout, use empty JSON
+# Verify socat listeners are running
+if ! kill -0 $SOCAT_3000_PID 2>/dev/null; then
+  echo "[RUN_SH] Error: socat on port 3000 failed to start"
+else
+  echo "[RUN_SH] ✅ VSOCK listener on port 3000 is ready (PID: $SOCAT_3000_PID)"
+fi
+
+if ! kill -0 $SOCAT_3001_PID 2>/dev/null; then
+  echo "[RUN_SH] Error: socat on port 3001 failed to start"
+else
+  echo "[RUN_SH] ✅ VSOCK listener on port 3001 is ready (PID: $SOCAT_3001_PID)"
+fi
+
+# Get a json blob with key/value pair for secrets
+# Use shorter timeout for initial attempt, then start persistent listener
+echo "[RUN_SH] Waiting for initial secrets via VSOCK (timeout: 10s)..."
+JSON_RESPONSE=$(timeout 10 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '')
+
+# If we got an empty response or timeout, use empty JSON and start persistent listener
 if [ -z "$JSON_RESPONSE" ]; then
-  echo "[RUN_SH] Warning: No secrets received, using empty JSON"
+  echo "[RUN_SH] ⚠️  No initial secrets received (will continue listening in background)"
   JSON_RESPONSE='{}'
+  
+  # Start persistent VSOCK listener in background for secret updates
+  (
+    echo "[SECRETS_LISTENER] Starting persistent VSOCK listener on port 7777..."
+    while true; do
+      UPDATE=$(socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '')
+      if [ -n "$UPDATE" ] && [ "$UPDATE" != "{}" ]; then
+        echo "[SECRETS_LISTENER] ✅ Received secrets update"
+        # Process the update (same logic as initial secrets)
+        if command -v jq >/dev/null 2>&1; then
+          echo "$UPDATE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpairs_update 2>/dev/null || true
+          if [ -f /tmp/kvpairs_update ] && [ -s /tmp/kvpairs_update ]; then
+            while IFS="=" read -r key value; do
+              export "$key"="$value"
+            done < /tmp/kvpairs_update
+            echo "[SECRETS_LISTENER] ✅ Updated environment variables from secrets"
+            rm -f /tmp/kvpairs_update
+          fi
+        fi
+      fi
+    done
+  ) &
+  SECRETS_LISTENER_PID=$!
+  echo "[SECRETS_LISTENER] Persistent listener started (PID: $SECRETS_LISTENER_PID)"
 fi
 
 # Sets all key value pairs as env variables that will be referred by the server
@@ -76,31 +122,8 @@ fi
 # Each forwarder bridges: 127.0.0.x:443 -> VSOCK CID 3:810x
 # The vsock-proxy on EC2 host forwards VSOCK traffic to the actual endpoint
 
-# Listens on Local VSOCK Port 3000 and forwards to localhost 3000
-echo "[RUN_SH] Starting VSOCK listener on port 3000"
-socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
-SOCAT_3000_PID=$!
-
-# Listen on VSOCK Port 3001 and forward to localhost 3001
-echo "[RUN_SH] Starting VSOCK listener on port 3001"
-socat VSOCK-LISTEN:3001,reuseaddr,fork TCP:localhost:3001 &
-SOCAT_3001_PID=$!
-
-# Wait a moment for socat to start
-sleep 2
-
-# Verify socat processes are running
-if ! kill -0 $SOCAT_3000_PID 2>/dev/null; then
-  echo "[RUN_SH] Error: socat on port 3000 failed to start"
-else
-  echo "[RUN_SH] socat on port 3000 is running (PID: $SOCAT_3000_PID)"
-fi
-
-if ! kill -0 $SOCAT_3001_PID 2>/dev/null; then
-  echo "[RUN_SH] Error: socat on port 3001 failed to start"
-else
-  echo "[RUN_SH] socat on port 3001 is running (PID: $SOCAT_3001_PID)"
-fi
+# VSOCK listeners for ports 3000 and 3001 are already started above
+# This ensures the enclave is ready to accept connections before the host tries to connect
 
 # Start nautilus-server
 echo "[RUN_SH] Starting nautilus-server..."
