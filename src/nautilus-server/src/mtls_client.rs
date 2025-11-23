@@ -94,30 +94,47 @@ impl MtlsCertConfig {
 
     /// Load certificates from environment variable (JSON format)
     /// Expected format: {"client_cert": "...", "client_key": "...", "ca_cert": "..."}
+    /// Certificates should be PEM format strings (not base64 encoded)
     pub fn from_env(env_var: &str) -> Result<Self> {
         let cert_json = std::env::var(env_var)
             .with_context(|| format!("Environment variable {} not set", env_var))?;
 
+        info!("[MTLS] Attempting to parse {} (length: {} bytes)", env_var, cert_json.len());
+
         let certs: serde_json::Value = serde_json::from_str(&cert_json)
-            .with_context(|| format!("Failed to parse {} as JSON", env_var))?;
+            .with_context(|| {
+                let preview = cert_json.chars().take(200).collect::<String>();
+                format!("Failed to parse {} as JSON. Preview: {}", env_var, preview)
+            })?;
 
-        let client_cert = certs["client_cert"]
+        let client_cert_str = certs["client_cert"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing client_cert in {}", env_var))?
-            .as_bytes()
-            .to_vec();
+            .ok_or_else(|| anyhow::anyhow!("Missing or invalid client_cert in {} (expected string)", env_var))?;
+        let client_cert = client_cert_str.as_bytes().to_vec();
+        info!("[MTLS] Loaded client_cert ({} bytes)", client_cert.len());
 
-        let client_key = certs["client_key"]
+        let client_key_str = certs["client_key"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing client_key in {}", env_var))?
-            .as_bytes()
-            .to_vec();
+            .ok_or_else(|| anyhow::anyhow!("Missing or invalid client_key in {} (expected string)", env_var))?;
+        let client_key = client_key_str.as_bytes().to_vec();
+        info!("[MTLS] Loaded client_key ({} bytes)", client_key.len());
 
-        let ca_cert = certs["ca_cert"]
+        let ca_cert_str = certs["ca_cert"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing ca_cert in {}", env_var))?
-            .as_bytes()
-            .to_vec();
+            .ok_or_else(|| anyhow::anyhow!("Missing or invalid ca_cert in {} (expected string)", env_var))?;
+        let ca_cert = ca_cert_str.as_bytes().to_vec();
+        info!("[MTLS] Loaded ca_cert ({} bytes)", ca_cert.len());
+
+        // Validate that certificates look like PEM format
+        if !client_cert_str.contains("-----BEGIN") {
+            warn!("[MTLS] client_cert doesn't appear to be PEM format (missing -----BEGIN marker)");
+        }
+        if !client_key_str.contains("-----BEGIN") {
+            warn!("[MTLS] client_key doesn't appear to be PEM format (missing -----BEGIN marker)");
+        }
+        if !ca_cert_str.contains("-----BEGIN") {
+            warn!("[MTLS] ca_cert doesn't appear to be PEM format (missing -----BEGIN marker)");
+        }
 
         Ok(Self {
             client_cert,
@@ -141,32 +158,90 @@ impl MtlsCertConfig {
 ///
 /// A configured reqwest Client that can make mTLS requests
 pub fn create_mtls_client_with_config(cert_config: MtlsCertConfig) -> Result<Client> {
-    use reqwest::Certificate;
-    use reqwest::Identity;
+    use rustls_pemfile::{certs, pkcs8_private_keys};
+    use std::io::Cursor;
+
+    info!("[MTLS] Starting mTLS client creation with rustls...");
 
     // Parse CA certificate
-    let ca_cert = Certificate::from_pem(&cert_config.ca_cert)
-        .context("Failed to parse CA certificate")?;
+    info!("[MTLS] Parsing CA certificate ({} bytes)...", cert_config.ca_cert.len());
+    let mut ca_certs_reader = Cursor::new(&cert_config.ca_cert);
+    let ca_certs_pem = certs(&mut ca_certs_reader)
+        .with_context(|| {
+            let ca_preview = String::from_utf8_lossy(&cert_config.ca_cert[..cert_config.ca_cert.len().min(100)]);
+            format!("Failed to parse CA certificate from PEM. First 100 bytes: {}", ca_preview)
+        })?;
+    
+    if ca_certs_pem.is_empty() {
+        return Err(anyhow::anyhow!("No CA certificates found in PEM data"));
+    }
+    info!("[MTLS] ✅ Parsed {} CA certificate(s)", ca_certs_pem.len());
 
-    // Parse client certificate and key
-    // Note: reqwest expects PKCS12 or PEM format with both cert and key
-    // We need to combine them into a single PEM or use Identity
-    let mut identity_pem = cert_config.client_cert.clone();
-    identity_pem.extend_from_slice(b"\n");
-    identity_pem.extend_from_slice(&cert_config.client_key);
+    // Parse client certificate
+    info!("[MTLS] Parsing client certificate ({} bytes)...", cert_config.client_cert.len());
+    let mut client_certs_reader = Cursor::new(&cert_config.client_cert);
+    let client_certs_pem = certs(&mut client_certs_reader)
+        .with_context(|| {
+            let cert_preview = String::from_utf8_lossy(&cert_config.client_cert[..cert_config.client_cert.len().min(100)]);
+            format!("Failed to parse client certificate from PEM. Preview: {}", cert_preview)
+        })?;
+    
+    if client_certs_pem.is_empty() {
+        return Err(anyhow::anyhow!("No client certificates found in PEM data"));
+    }
+    info!("[MTLS] ✅ Parsed {} client certificate(s)", client_certs_pem.len());
 
-    let identity = Identity::from_pem(&identity_pem)
-        .context("Failed to parse client certificate and key")?;
+    // Parse client private key
+    info!("[MTLS] Parsing client private key ({} bytes)...", cert_config.client_key.len());
+    let mut key_reader = Cursor::new(&cert_config.client_key);
+    let keys_pem = pkcs8_private_keys(&mut key_reader)
+        .with_context(|| {
+            let key_preview = String::from_utf8_lossy(&cert_config.client_key[..cert_config.client_key.len().min(100)]);
+            format!("Failed to parse client private key from PEM. Preview: {}", key_preview)
+        })?;
+    
+    if keys_pem.is_empty() {
+        return Err(anyhow::anyhow!("No private keys found in PEM data"));
+    }
+    
+    let client_key_pem = keys_pem.into_iter().next().unwrap();
+    info!("[MTLS] ✅ Parsed client private key");
 
-    // Build client with mTLS configuration
+    // Build rustls ClientConfig
+    info!("[MTLS] Building rustls ClientConfig...");
+    let mut root_store = rustls::RootCertStore::empty();
+    for ca_cert_pem in &ca_certs_pem {
+        let cert = rustls::Certificate(ca_cert_pem.clone());
+        root_store.add(&cert)
+            .with_context(|| "Failed to add CA certificate to root store")?;
+    }
+    info!("[MTLS] ✅ Added {} CA certificate(s) to root store", root_store.len());
+
+    // Convert client certificates to rustls::Certificate
+    let client_certs: Vec<rustls::Certificate> = client_certs_pem
+        .into_iter()
+        .map(|pem| rustls::Certificate(pem))
+        .collect();
+
+    // Convert private key to rustls::PrivateKey
+    let client_key = rustls::PrivateKey(client_key_pem);
+
+    let client_config = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(root_store)
+        .with_client_auth_cert(client_certs, client_key)
+        .with_context(|| "Failed to build rustls ClientConfig")?;
+    info!("[MTLS] ✅ Built rustls ClientConfig");
+
+    // Build reqwest Client with custom rustls config
+    info!("[MTLS] Building reqwest Client with rustls configuration...");
     let client = Client::builder()
-        .add_root_certificate(ca_cert)
-        .identity(identity)
+        .use_preconfigured_tls(client_config)
         .danger_accept_invalid_certs(false) // Verify server certificate
         .build()
-        .context("Failed to build mTLS client")?;
+        .with_context(|| "Failed to build reqwest Client with rustls configuration")?;
 
-    info!("[MTLS] Created mTLS client successfully");
+    info!("[MTLS] ✅ Created mTLS client successfully");
     Ok(client)
 }
 

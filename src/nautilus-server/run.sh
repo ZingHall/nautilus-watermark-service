@@ -44,17 +44,38 @@ echo "[RUN_SH] /etc/hosts configuration:"
 cat /etc/hosts
 
 # Get a json blob with key/value pair for secrets
-# Use timeout to prevent blocking indefinitely (30 seconds timeout)
+# Use a short timeout (5 seconds) to avoid blocking nautilus-server startup
+# The nautilus SDK expects a "ready" signal quickly, so we can't wait too long
+# Secrets can be sent after the enclave is running if needed
 # Note: timeout command may not be available in enclave, use busybox timeout if available
-echo "[RUN_SH] Waiting for secrets.json via VSOCK (timeout: 30s)..."
+echo "[RUN_SH] Waiting for secrets.json via VSOCK (timeout: 5s)..."
 if command -v timeout >/dev/null 2>&1; then
-  JSON_RESPONSE=$(timeout 30 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+  JSON_RESPONSE=$(timeout 5 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
 elif command -v busybox >/dev/null 2>&1 && busybox timeout --help >/dev/null 2>&1; then
-  JSON_RESPONSE=$(busybox timeout -t 30 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+  JSON_RESPONSE=$(busybox timeout -t 5 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
 else
-  # Fallback: try to connect without timeout (may block, but better than failing)
-  echo "[RUN_SH] Warning: timeout command not available, using socat without timeout"
-  JSON_RESPONSE=$(socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+  # Fallback: if timeout is not available, we need to make this non-blocking
+  # Start socat in background with a timeout mechanism
+  echo "[RUN_SH] Warning: timeout command not available, using background socat with short wait"
+  JSON_RESPONSE='{}'
+  # Try to receive in background, but don't wait more than 5 seconds
+  (
+    socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null > /tmp/secrets.json.$$ 2>&1 || true
+  ) &
+  SOCAT_PID=$!
+  # Wait up to 5 seconds for socat to receive data
+  for i in 1 2 3 4 5; do
+    if [ -f /tmp/secrets.json.$$ ] && [ -s /tmp/secrets.json.$$ ]; then
+      JSON_RESPONSE=$(cat /tmp/secrets.json.$$ 2>/dev/null || echo '{}')
+      kill $SOCAT_PID 2>/dev/null || true
+      break
+    fi
+    sleep 1
+  done
+  # Clean up
+  kill $SOCAT_PID 2>/dev/null || true
+  rm -f /tmp/secrets.json.$$ 2>/dev/null || true
+  [ -z "$JSON_RESPONSE" ] && JSON_RESPONSE='{}'
 fi
 
 # If we got an empty response or timeout, use empty JSON
