@@ -13,13 +13,12 @@
 # Don't exit on error - we want to continue even if some commands fail
 set +e
 
-# Redirect output to both console (for nitro-cli console) and log file (for debugging)
-# Note: Log file can be read via VSOCK if needed, but console output is primary
-LOG_FILE="/tmp/enclave-run.log"
-exec > >(tee "$LOG_FILE") 2>&1
+# Redirect output to console (stderr for better visibility in enclave console)
+# Note: Process substitution with tee can interfere with exec, so we use stderr directly
+# Logs will be captured by nitro-cli console or the console capture script
+exec 2>&1
 
 echo "[RUN_SH] Starting nautilus-server initialization script"
-echo "[RUN_SH] Log file: $LOG_FILE (can be read via VSOCK if needed)"
 export PYTHONPATH=/lib/python3.11:/usr/local/lib/python3.11/lib-dynload:/usr/local/lib/python3.11/site-packages:/lib
 export LD_LIBRARY_PATH=/lib:$LD_LIBRARY_PATH
 
@@ -231,8 +230,12 @@ echo "[RUN_SH] This will replace the current shell process"
 echo "[RUN_SH] If you see this message after exec, something went wrong"
 echo "[RUN_SH] ========================================"
 
+# Flush all output before exec to ensure logs are visible
+sync 2>/dev/null || true
+
 # Use exec to replace shell process (required for Nitro Enclaves)
 # This should never return - if it does, the binary failed to start
+# Note: exec must be the last command and must not be in a subshell or process substitution
 exec /nautilus-server
 
 # This should never be reached, but if it is, log it

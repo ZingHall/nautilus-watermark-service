@@ -1,4 +1,4 @@
-# Troubleshooting Enclave Boot Failure (E36/E39)
+# Troubleshooting Enclave Boot Failure (E36/E39/VsockTimeoutError)
 
 ## Error Description
 
@@ -6,9 +6,10 @@ When you see errors like:
 ```
 [ E36 ] Enclave boot failure
 [ E39 ] Enclave process connection failure
+VsockTimeoutError - Waiting on enclave to boot failed
 ```
 
-This indicates that the enclave process (`/nautilus-server`) failed to start or immediately exited after starting.
+This indicates that the enclave process (`/nautilus-server`) failed to start, immediately exited after starting, or did not send the "ready" signal in time.
 
 ## Diagnostic Steps
 
