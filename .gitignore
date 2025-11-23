@@ -11,3 +11,4 @@ secrets-policy.json
 
 /out
 /target
+certs/client-cert.json

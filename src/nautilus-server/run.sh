@@ -12,7 +12,14 @@
 
 # Don't exit on error - we want to continue even if some commands fail
 set +e
+
+# Redirect output to both console (for nitro-cli console) and log file (for debugging)
+# Note: Log file can be read via VSOCK if needed, but console output is primary
+LOG_FILE="/tmp/enclave-run.log"
+exec > >(tee "$LOG_FILE") 2>&1
+
 echo "[RUN_SH] Starting nautilus-server initialization script"
+echo "[RUN_SH] Log file: $LOG_FILE (can be read via VSOCK if needed)"
 export PYTHONPATH=/lib/python3.11:/usr/local/lib/python3.11/lib-dynload:/usr/local/lib/python3.11/site-packages:/lib
 export LD_LIBRARY_PATH=/lib:$LD_LIBRARY_PATH
 
@@ -154,23 +161,82 @@ else
 fi
 
 # Start nautilus-server
+echo "[RUN_SH] ========================================"
 echo "[RUN_SH] Starting nautilus-server..."
-if [ -f /nautilus-server ]; then
-  echo "[RUN_SH] Found /nautilus-server, checking if executable..."
-  ls -lh /nautilus-server || true
-  
-  # Check if file is executable
-  if [ ! -x /nautilus-server ]; then
-    echo "[RUN_SH] Warning: /nautilus-server is not executable, attempting to chmod..."
-    chmod +x /nautilus-server || true
-  fi
-  
-  echo "[RUN_SH] Executing /nautilus-server..."
-  # Use exec to replace shell process (required for Nitro Enclaves)
-  exec /nautilus-server
-else
-  echo "[RUN_SH] Error: /nautilus-server not found!"
+echo "[RUN_SH] ========================================"
+
+# Verify /nautilus-server exists and is accessible
+if [ ! -f /nautilus-server ]; then
+  echo "[RUN_SH] ❌ ERROR: /nautilus-server not found!"
   echo "[RUN_SH] Listing files in root directory:"
-  ls -la / | head -20 || true
+  ls -la / | head -30 || true
+  echo "[RUN_SH] Listing files in /bin:"
+  ls -la /bin 2>/dev/null | head -20 || true
+  echo "[RUN_SH] Current working directory: $(pwd)"
+  echo "[RUN_SH] PATH: $PATH"
+  echo "[RUN_SH] This is a fatal error - enclave cannot start without nautilus-server"
+  # Don't exit - let the script continue to see what happens
+  # But we'll try to find the binary
+  echo "[RUN_SH] Searching for nautilus-server..."
+  find / -name "nautilus-server" 2>/dev/null | head -5 || echo "[RUN_SH] No nautilus-server found in filesystem"
+  # Sleep to allow logs to be captured before process exits
+  sleep 5
   exit 1
 fi
+
+echo "[RUN_SH] ✅ Found /nautilus-server"
+ls -lh /nautilus-server || true
+file /nautilus-server 2>/dev/null || echo "[RUN_SH] file command not available"
+
+# Check if file is executable
+if [ ! -x /nautilus-server ]; then
+  echo "[RUN_SH] ⚠️  Warning: /nautilus-server is not executable, attempting to chmod..."
+  chmod +x /nautilus-server || {
+    echo "[RUN_SH] ❌ ERROR: Failed to make /nautilus-server executable"
+    ls -l /nautilus-server || true
+    exit 1
+  }
+  echo "[RUN_SH] ✅ Made /nautilus-server executable"
+fi
+
+# Verify it's still executable after chmod
+if [ ! -x /nautilus-server ]; then
+  echo "[RUN_SH] ❌ ERROR: /nautilus-server is still not executable after chmod"
+  ls -l /nautilus-server || true
+  exit 1
+fi
+
+# Check if we can read the file
+if [ ! -r /nautilus-server ]; then
+  echo "[RUN_SH] ❌ ERROR: /nautilus-server is not readable"
+  ls -l /nautilus-server || true
+  exit 1
+fi
+
+# Print environment info before starting
+echo "[RUN_SH] Environment variables:"
+echo "[RUN_SH]   PATH=$PATH"
+echo "[RUN_SH]   LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+echo "[RUN_SH]   PYTHONPATH=$PYTHONPATH"
+echo "[RUN_SH]   ECS_WATERMARK_ENDPOINT=$ECS_WATERMARK_ENDPOINT"
+echo "[RUN_SH]   MTLS_CLIENT_CERT_JSON=${MTLS_CLIENT_CERT_JSON:+set (length: ${#MTLS_CLIENT_CERT_JSON})}${MTLS_CLIENT_CERT_JSON:-not set}"
+
+# Verify socat processes are still running
+echo "[RUN_SH] Checking socat processes..."
+ps aux 2>/dev/null | grep -E "socat|VSOCK" || echo "[RUN_SH] ps/grep not available or no socat processes found"
+
+echo "[RUN_SH] ========================================"
+echo "[RUN_SH] Executing /nautilus-server..."
+echo "[RUN_SH] This will replace the current shell process"
+echo "[RUN_SH] If you see this message after exec, something went wrong"
+echo "[RUN_SH] ========================================"
+
+# Use exec to replace shell process (required for Nitro Enclaves)
+# This should never return - if it does, the binary failed to start
+exec /nautilus-server
+
+# This should never be reached, but if it is, log it
+echo "[RUN_SH] ❌ ERROR: exec /nautilus-server returned! This should never happen."
+echo "[RUN_SH] The binary may have failed to start or immediately exited."
+sleep 5
+exit 1

@@ -346,8 +346,14 @@ cargo run --features zing-watermark --bin nautilus-server
 You can test the mTLS client code separately:
 
 ```bash
-# Set up certificates
-export MTLS_CLIENT_CERT_JSON=$(cat ../certs/client-cert.json | jq -c)
+# Set up certificates (path is relative to project root)
+if [ -f "../../certs/client-cert.json" ]; then
+  export MTLS_CLIENT_CERT_JSON=$(cat ../../certs/client-cert.json | jq -c)
+  echo "✅ Loaded MTLS_CLIENT_CERT_JSON"
+else
+  echo "⚠️  Warning: ../../certs/client-cert.json not found"
+  echo "   Make sure you completed Step 2 to create client-cert.json"
+fi
 
 # Run a test
 cargo test --features zing-watermark --lib -- --nocapture test_watermark

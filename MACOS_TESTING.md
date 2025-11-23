@@ -93,7 +93,16 @@ cd src/nautilus-server
 
 # Set environment variables
 export ECS_WATERMARK_ENDPOINT=https://localhost:8080
-export MTLS_CLIENT_CERT_JSON=$(cat ../../certs/client-cert.json | jq -c)
+
+# Load client-cert.json (path is relative to project root, not src/nautilus-server)
+if [ -f "../../certs/client-cert.json" ]; then
+  export MTLS_CLIENT_CERT_JSON=$(cat ../../certs/client-cert.json | jq -c)
+  echo "✅ Loaded MTLS_CLIENT_CERT_JSON from ../../certs/client-cert.json"
+else
+  echo "⚠️  Warning: ../../certs/client-cert.json not found"
+  echo "   Make sure you completed Step 2 to create client-cert.json"
+  echo "   Or set MTLS_CLIENT_CERT_JSON manually"
+fi
 
 # Run the server
 RUST_LOG=debug cargo run --features zing-watermark --bin nautilus-server
