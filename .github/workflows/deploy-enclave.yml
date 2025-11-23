@@ -25,6 +25,13 @@ on:
         default: false
         type: boolean
 
+# Cancel concurrent runs - when a new deployment is triggered, cancel any in-progress runs
+# Group by environment so staging and production can run concurrently
+# For push events, default to staging. For workflow_dispatch, use the input environment.
+concurrency:
+  group: deploy-enclave-${{ github.event.inputs.environment != '' && github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: true
+
 env:
   AWS_ACCOUNT_ID: 287767576800
   AWS_REGION: ap-northeast-1
