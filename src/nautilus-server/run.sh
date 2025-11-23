@@ -39,8 +39,17 @@ cat /etc/hosts
 
 # Get a json blob with key/value pair for secrets
 # Use timeout to prevent blocking indefinitely (30 seconds timeout)
+# Note: timeout command may not be available in enclave, use busybox timeout if available
 echo "[RUN_SH] Waiting for secrets.json via VSOCK (timeout: 30s)..."
-JSON_RESPONSE=$(timeout 30 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+if command -v timeout >/dev/null 2>&1; then
+  JSON_RESPONSE=$(timeout 30 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+elif command -v busybox >/dev/null 2>&1 && busybox timeout --help >/dev/null 2>&1; then
+  JSON_RESPONSE=$(busybox timeout -t 30 socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+else
+  # Fallback: try to connect without timeout (may block, but better than failing)
+  echo "[RUN_SH] Warning: timeout command not available, using socat without timeout"
+  JSON_RESPONSE=$(socat - VSOCK-LISTEN:7777,reuseaddr 2>/dev/null || echo '{}')
+fi
 
 # If we got an empty response or timeout, use empty JSON
 if [ -z "$JSON_RESPONSE" ]; then
@@ -52,25 +61,39 @@ fi
 # This is shown as a example below. For production usecases, it's best to set the
 # keys explicitly rather than dynamically.
 if command -v jq >/dev/null 2>&1; then
+  echo "[RUN_SH] Parsing JSON response with jq..."
   echo "$JSON_RESPONSE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpairs 2>/dev/null || true
   if [ -f /tmp/kvpairs ] && [ -s /tmp/kvpairs ]; then
+    echo "[RUN_SH] Loading environment variables from JSON..."
     while IFS="=" read -r key value; do
+      # Skip empty keys
+      [ -z "$key" ] && continue
       export "$key"="$value"
+      echo "[RUN_SH] Exported: $key"
     done < /tmp/kvpairs
     echo "[RUN_SH] Loaded secrets from JSON"
   else
-    echo "[RUN_SH] No secrets to load"
+    echo "[RUN_SH] No secrets to load (empty or invalid JSON)"
   fi
   rm -f /tmp/kvpairs
   
   # Handle mTLS client certificates if provided via MTLS_CLIENT_CERT_JSON
   if [ -n "$MTLS_CLIENT_CERT_JSON" ]; then
     echo "[RUN_SH] Writing mTLS client certificates..."
-    mkdir -p /opt/enclave/certs
+    mkdir -p /opt/enclave/certs || {
+      echo "[RUN_SH] Error: Failed to create /opt/enclave/certs directory"
+      # Don't exit - continue without mTLS certs
+    }
     
-    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_cert' > /opt/enclave/certs/client.crt 2>/dev/null || true
-    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_key' > /opt/enclave/certs/client.key 2>/dev/null || true
-    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.ca_cert' > /opt/enclave/certs/ecs-ca.crt 2>/dev/null || true
+    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_cert' > /opt/enclave/certs/client.crt 2>/dev/null || {
+      echo "[RUN_SH] Error: Failed to write client.crt"
+    }
+    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.client_key' > /opt/enclave/certs/client.key 2>/dev/null || {
+      echo "[RUN_SH] Error: Failed to write client.key"
+    }
+    echo "$MTLS_CLIENT_CERT_JSON" | jq -r '.ca_cert' > /opt/enclave/certs/ecs-ca.crt 2>/dev/null || {
+      echo "[RUN_SH] Error: Failed to write ecs-ca.crt"
+    }
     
     # Set proper permissions
     chmod 600 /opt/enclave/certs/client.key 2>/dev/null || true
@@ -78,13 +101,20 @@ if command -v jq >/dev/null 2>&1; then
     chmod 644 /opt/enclave/certs/ecs-ca.crt 2>/dev/null || true
     
     if [ -f /opt/enclave/certs/client.crt ] && [ -f /opt/enclave/certs/client.key ] && [ -f /opt/enclave/certs/ecs-ca.crt ]; then
-      echo "[RUN_SH] mTLS client certificates written to /opt/enclave/certs/"
+      echo "[RUN_SH] ✅ mTLS client certificates written to /opt/enclave/certs/"
+      ls -lh /opt/enclave/certs/ || true
     else
-      echo "[RUN_SH] Warning: Failed to write some mTLS certificate files"
+      echo "[RUN_SH] ⚠️  Warning: Failed to write some mTLS certificate files"
+      ls -la /opt/enclave/certs/ || true
     fi
+  else
+    echo "[RUN_SH] MTLS_CLIENT_CERT_JSON not set, skipping mTLS certificate setup"
   fi
 else
-  echo "[RUN_SH] Warning: jq not available, skipping secrets parsing"
+  echo "[RUN_SH] ⚠️  Warning: jq not available, skipping secrets parsing"
+  echo "[RUN_SH] Available commands:"
+  which jq || echo "  jq: not found"
+  which socat || echo "  socat: not found"
 fi
 
 # Run traffic forwarder in background and start the server
@@ -126,11 +156,21 @@ fi
 # Start nautilus-server
 echo "[RUN_SH] Starting nautilus-server..."
 if [ -f /nautilus-server ]; then
-  /nautilus-server
-  SERVER_EXIT_CODE=$?
-  echo "[RUN_SH] nautilus-server exited with code: $SERVER_EXIT_CODE"
-  exit $SERVER_EXIT_CODE
+  echo "[RUN_SH] Found /nautilus-server, checking if executable..."
+  ls -lh /nautilus-server || true
+  
+  # Check if file is executable
+  if [ ! -x /nautilus-server ]; then
+    echo "[RUN_SH] Warning: /nautilus-server is not executable, attempting to chmod..."
+    chmod +x /nautilus-server || true
+  fi
+  
+  echo "[RUN_SH] Executing /nautilus-server..."
+  # Use exec to replace shell process (required for Nitro Enclaves)
+  exec /nautilus-server
 else
   echo "[RUN_SH] Error: /nautilus-server not found!"
+  echo "[RUN_SH] Listing files in root directory:"
+  ls -la / | head -20 || true
   exit 1
 fi
