@@ -76,6 +76,8 @@ COPY --from=user-nit /bin/init initramfs
 RUN cp /src/nautilus-server/target/${TARGET}/release/nautilus-server initramfs
 RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/
+# Ensure run.sh and nautilus-server are executable
+RUN chmod +x initramfs/run.sh initramfs/nautilus-server || true
 # Copy allowed_endpoints.yaml if it exists for the current ENCLAVE_APP
 RUN if [ -f "/src/nautilus-server/src/apps/${ENCLAVE_APP}/allowed_endpoints.yaml" ]; then \
     cp /src/nautilus-server/src/apps/${ENCLAVE_APP}/allowed_endpoints.yaml initramfs/; \
