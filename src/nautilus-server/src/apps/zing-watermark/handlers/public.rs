@@ -21,8 +21,8 @@ use crate::{
                 GetSealEncodedRequestsResponse,
             },
             verify::{verify_and_parse_request_intent, PersonalMessage, RequestIntent},
-            watermark::{call_watermark_service, WatermarkRequest},
         },
+        stego,
         FILE_KEYS, SEAL_CONFIG, ZING_FILE_KEY_IV_12_BYTES,
     },
     AppState, EnclaveError,
@@ -332,37 +332,23 @@ pub async fn decrypt_files(
         && decrypted_data[4..8] == [0x0D, 0x0A, 0x1A, 0x0A];
 
     let final_data = if is_png {
-        // Decrypted data is a PNG image, apply watermark
-        info!("[DECRYPT] Decrypted content is a PNG image, applying watermark");
+        // Decrypted data is a PNG image, embed owner_address using steganography
+        info!("[DECRYPT] Decrypted content is a PNG image, embedding owner_address: {}", request_intent.owner_address);
         
-        let decrypted_content_base64 = general_purpose::STANDARD.encode(&decrypted_data);
-        
-        // Call watermark service
-        let watermark_request = WatermarkRequest {
-            file_id: request_intent.content_id.clone(),
-            user_id: request_intent.owner_address.clone(),
-            image: decrypted_content_base64.clone(), // Base64 encoded PNG image
-            data: None, // Optional additional data to embed
-        };
-
-        match call_watermark_service(watermark_request).await {
-            Ok(watermark_response) => {
-                if let Some(watermarked_data) = watermark_response.watermarked_data {
-                    info!("[DECRYPT] Watermark applied successfully");
-                    watermarked_data
-                } else {
-                    warn!("[DECRYPT] Watermark service returned no watermarked_data, using original");
-                    decrypted_content_base64
-                }
+        // Embed owner_address into PNG using steganography
+        match stego::embed_message(&decrypted_data, &request_intent.owner_address) {
+            Ok(watermarked_image) => {
+                info!("[DECRYPT] Successfully embedded owner_address into PNG using steganography");
+                general_purpose::STANDARD.encode(&watermarked_image)
             }
             Err(e) => {
-                warn!("[DECRYPT] Failed to apply watermark: {}. Using original decrypted content.", e);
-                decrypted_content_base64
+                warn!("[DECRYPT] Failed to embed owner_address using steganography: {}. Using original decrypted content.", e);
+                general_purpose::STANDARD.encode(decrypted_data)
             }
         }
     } else {
         // Not a PNG image, return original decrypted content
-        info!("[DECRYPT] Decrypted content is not a PNG image, skipping watermark");
+        info!("[DECRYPT] Decrypted content is not a PNG image, skipping steganography");
         general_purpose::STANDARD.encode(decrypted_data)
     };
 
