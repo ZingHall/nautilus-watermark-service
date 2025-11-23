@@ -2,7 +2,7 @@ name: Deploy to Nitro Enclave
 
 on:
   push:
-    branches: [main]
+    branches: [main,test]
     paths:
       - 'src/**'
       - 'Containerfile'
