@@ -31,13 +31,23 @@ MTLS_SECRET_VALUE=$(aws secretsmanager get-secret-value \
 if [ "$MTLS_SECRET_VALUE" != "{}" ] && echo "$MTLS_SECRET_VALUE" | jq empty 2>/dev/null; then
     echo "✅ Retrieved mTLS certificates from Secrets Manager"
     # Create secrets.json with mTLS certificates and endpoint
+    # Use a temporary file to avoid shell quoting issues with jq
+    TMP_SECRETS=$(mktemp)
+    echo "$MTLS_SECRET_VALUE" > "$TMP_SECRETS"
     jq -n \
-        --argjson cert_json "$MTLS_SECRET_VALUE" \
+        --slurpfile cert_json "$TMP_SECRETS" \
         --arg endpoint "https://watermark.internal.staging.zing.you:8080" \
         '{
-            MTLS_CLIENT_CERT_JSON: $cert_json,
+            MTLS_CLIENT_CERT_JSON: $cert_json[0],
             ECS_WATERMARK_ENDPOINT: $endpoint
         }' > secrets.json
+    rm -f "$TMP_SECRETS"
+    
+    # Verify the JSON was created correctly
+    if ! jq empty secrets.json 2>/dev/null; then
+        echo "⚠️  Warning: Failed to create valid secrets.json, using empty JSON"
+        echo '{}' > secrets.json
+    fi
 else
     echo "⚠️  Failed to retrieve mTLS certificates from Secrets Manager, using empty secrets"
     echo "   This is expected if the secret doesn't exist or IAM permissions are missing"
