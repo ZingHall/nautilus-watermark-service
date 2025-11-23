@@ -46,13 +46,18 @@ if [ "$MTLS_SECRET_VALUE" != "{}" ] && [ -n "$MTLS_SECRET_VALUE" ] && echo "$MTL
     echo "$MTLS_SECRET_VALUE" > "$TMP_SECRETS"
     
     # Use timeout for jq processing as well (5 seconds max)
-    if timeout 5 jq -n \
+    # Capture stderr to see errors if jq fails
+    JQ_OUTPUT=$(timeout 5 jq -n \
         --slurpfile cert_json "$TMP_SECRETS" \
         --arg endpoint "https://watermark.internal.staging.zing.you:8080" \
         '{
             MTLS_CLIENT_CERT_JSON: $cert_json[0],
             ECS_WATERMARK_ENDPOINT: $endpoint
-        }' > /opt/nautilus/secrets.json 2>/dev/null; then
+        }' 2>&1)
+    JQ_EXIT_CODE=$?
+    
+    if [ $JQ_EXIT_CODE -eq 0 ] && [ -n "$JQ_OUTPUT" ]; then
+        echo "$JQ_OUTPUT" > /opt/nautilus/secrets.json
         # Verify the JSON was created correctly
         if ! jq empty /opt/nautilus/secrets.json 2>/dev/null; then
             echo "⚠️  Warning: Failed to create valid secrets.json, using empty JSON"
@@ -61,7 +66,9 @@ if [ "$MTLS_SECRET_VALUE" != "{}" ] && [ -n "$MTLS_SECRET_VALUE" ] && echo "$MTL
             echo "✅ Created secrets.json with mTLS certificates at /opt/nautilus/secrets.json"
         fi
     else
-        echo "⚠️  Warning: jq processing timed out or failed, using empty JSON"
+        echo "⚠️  Warning: jq processing timed out or failed (exit code: $JQ_EXIT_CODE)"
+        echo "   jq error output: $JQ_OUTPUT"
+        echo "   Using empty JSON as fallback"
         echo '{}' > /opt/nautilus/secrets.json
     fi
     rm -f "$TMP_SECRETS"
